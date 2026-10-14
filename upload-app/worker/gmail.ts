@@ -73,6 +73,9 @@ export interface GmailAccount {
   lastScanAt?: string;
   lastScanSummary?: string;
   lastScanError?: string;
+  // Set when Google rejected the stored refresh token (revoked, expired, or
+  // password changed); the account must be linked again.
+  needsReconnect?: boolean;
   seenIds: string[];
 }
 
@@ -82,6 +85,7 @@ export interface GmailAccountStatus {
   lastScanAt?: string;
   lastScanSummary?: string;
   lastScanError?: string;
+  needsReconnect?: boolean;
 }
 
 export interface GmailStatus {
@@ -104,6 +108,8 @@ export type ImportFile = (file: GmailImportFile) => Promise<{ key: string } | { 
 
 export interface GmailScanAccountResult {
   email: string;
+  // True when the scan could not run at all for this account.
+  failed?: boolean;
   checked: number;
   imported: Array<{ key: string; filename: string; subject: string }>;
   errors: string[];
@@ -167,6 +173,7 @@ export async function getStatus(env: GmailEnv): Promise<GmailStatus> {
       lastScanAt: a.lastScanAt,
       lastScanSummary: a.lastScanSummary,
       lastScanError: a.lastScanError,
+      needsReconnect: a.needsReconnect,
     })),
   };
 }
@@ -212,6 +219,16 @@ interface GoogleTokenResponse {
   scope?: string;
 }
 
+class GoogleTokenError extends Error {
+  // invalid_grant: the refresh token was revoked or expired.
+  readonly revoked: boolean;
+
+  constructor(status: number, body: string) {
+    super(`Google token endpoint ${status}: ${body.slice(0, 300)}`);
+    this.revoked = status === 400 && body.includes('invalid_grant');
+  }
+}
+
 async function tokenRequest(env: GmailEnv, body: Record<string, string>): Promise<GoogleTokenResponse> {
   const res = await fetch(TOKEN_URL, {
     method: 'POST',
@@ -223,7 +240,7 @@ async function tokenRequest(env: GmailEnv, body: Record<string, string>): Promis
     }).toString(),
   });
   if (!res.ok) {
-    throw new Error(`Google token endpoint ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    throw new GoogleTokenError(res.status, await res.text());
   }
   return (await res.json()) as GoogleTokenResponse;
 }
@@ -261,6 +278,7 @@ export async function exchangeCode(env: GmailEnv, requestUrl: string, code: stri
     accessToken: token.access_token,
     expiresAt: Math.floor(Date.now() / 1000) + (token.expires_in || 3600),
     lastScanError: undefined,
+    needsReconnect: undefined,
   };
   await saveAccounts(env, [...accounts.filter((a) => a.email !== email), next]);
   return email;
@@ -573,9 +591,10 @@ function afterClause(env: GmailEnv, account: GmailAccount): string {
 }
 
 function summarise(result: GmailScanAccountResult): string {
-  const parts = [`${result.imported.length} imported from ${result.checked} new emails`];
-  if (result.more) parts.push('more waiting for the next scan');
-  if (result.errors.length) parts.push(`${result.errors.length} failed`);
+  const receipts = `${result.imported.length} receipt${result.imported.length === 1 ? '' : 's'}`;
+  const parts = [`${receipts} from ${result.checked} new email${result.checked === 1 ? '' : 's'}`];
+  if (result.more) parts.push('more on the next check');
+  if (result.errors.length) parts.push(`${result.errors.length} to retry`);
   return parts.join(', ');
 }
 
@@ -588,6 +607,7 @@ async function scanAccount(env: GmailEnv, email: string, importFile: ImportFile)
   const seen = new Set(account.seenIds);
   const newlySeen: string[] = [];
   let fatal: string | undefined;
+  let revoked = false;
 
   try {
     const accessToken = await accessTokenFor(env, account);
@@ -626,6 +646,8 @@ async function scanAccount(env: GmailEnv, email: string, importFile: ImportFile)
     }
   } catch (error) {
     fatal = error instanceof Error ? error.message : String(error);
+    revoked = error instanceof GoogleTokenError && error.revoked;
+    result.failed = true;
     result.errors.push(fatal);
   }
 
@@ -639,6 +661,7 @@ async function scanAccount(env: GmailEnv, email: string, importFile: ImportFile)
     lastScanAt: new Date().toISOString(),
     lastScanSummary: fatal ? undefined : summarise(result),
     lastScanError: fatal,
+    needsReconnect: revoked || undefined,
   }));
   return result;
 }

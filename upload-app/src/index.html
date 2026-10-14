@@ -103,21 +103,21 @@
         </p>
       </div>
       <div class="claims-toolbar-actions">
-        <button id="gmailToggleBtn" class="btn-secondary btn-compact" type="button" aria-expanded="false" aria-controls="gmailSection">Gmail</button>
+        <button id="gmailToggleBtn" class="btn-secondary btn-compact gmail-toggle" type="button" aria-expanded="false" aria-controls="gmailSection">Gmail<span id="gmailAlert" class="gmail-alert-dot" hidden><span class="visually-hidden"> (needs attention)</span></span></button>
         <button id="findMatchesBtn" class="btn-secondary btn-compact" type="button">Find matches</button>
         <button id="refreshBtn" class="btn-refresh" type="button">Refresh</button>
       </div>
     </div>
 
-    <section id="gmailSection" class="gmail-section" hidden>
+    <section id="gmailSection" class="gmail-section" aria-labelledby="gmailHeading" hidden>
       <div class="gmail-header">
-        <h2>Gmail import</h2>
+        <h2 id="gmailHeading">Gmail import <span id="gmailCount"></span></h2>
         <div class="gmail-actions">
-          <button id="gmailScanBtn" class="btn-secondary btn-compact" type="button">Scan now</button>
-          <button id="gmailConnectBtn" class="btn-primary btn-compact" type="button">Link account</button>
+          <button id="gmailScanBtn" class="btn-secondary btn-compact" type="button" hidden>Scan now</button>
+          <button id="gmailConnectBtn" class="btn-primary btn-compact" type="button">Link Gmail account</button>
         </div>
       </div>
-      <p id="gmailIntro" class="gmail-intro">Checking Gmail…</p>
+      <p id="gmailIntro" class="gmail-intro" aria-live="polite">Checking Gmail…</p>
       <ul id="gmailAccountList" class="gmail-account-list"></ul>
     </section>
 

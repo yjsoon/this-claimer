@@ -2471,30 +2471,34 @@ export default {
       if (path === '/gmail/callback' && request.method === 'GET') {
         const noLeak = { ...corsHeaders, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' };
         const oauthError = url.searchParams.get('error');
+        // Failures land back in the app with a short code the UI explains,
+        // rather than on a bare error page.
+        const backToApp = (query: string) =>
+          new Response(null, {
+            status: 302,
+            headers: {
+              ...noLeak,
+              Location: `${url.origin}/?${query}`,
+              'Set-Cookie': 'gmail_oauth_state=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0',
+            },
+          });
         if (oauthError) {
-          return new Response(`Gmail authorisation failed: ${oauthError}`, { status: 400, headers: noLeak });
+          return backToApp(`gmailError=${oauthError === 'access_denied' ? 'access_denied' : 'failed'}`);
         }
         const code = url.searchParams.get('code');
         const state = url.searchParams.get('state');
         const cookieState = parseCookie(request.headers.get('Cookie'), 'gmail_oauth_state');
         if (!code || !state || !cookieState || state !== cookieState) {
-          return new Response('Invalid or expired authorisation state.', { status: 400, headers: noLeak });
+          return backToApp('gmailError=expired');
         }
         let email: string;
         try {
           email = await gmail.exchangeCode(env, request.url, code);
         } catch (err) {
-          const message = err instanceof Error ? err.message : 'Gmail token exchange failed';
-          return new Response(message, { status: 502, headers: noLeak });
+          console.log(`gmail link failed: ${err instanceof Error ? err.message : String(err)}`);
+          return backToApp('gmailError=failed');
         }
-        return new Response(null, {
-          status: 302,
-          headers: {
-            ...noLeak,
-            Location: `${url.origin}/?gmail=${encodeURIComponent(email)}`,
-            'Set-Cookie': 'gmail_oauth_state=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0',
-          },
-        });
+        return backToApp(`gmail=${encodeURIComponent(email)}`);
       }
 
       // GET /gmail/status - linked accounts and their last scan

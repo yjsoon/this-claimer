@@ -60,6 +60,7 @@ const messages = {
 const attachments = { a1: PDF, a4: BIG_IMAGE };
 
 const calls = [];
+let revokeNext = false;
 global.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === 'string' ? input : input.url);
   calls.push(`${init.method || 'GET'} ${url.host}${url.pathname}`);
@@ -69,6 +70,10 @@ global.fetch = async (input, init = {}) => {
     const body = new URLSearchParams(init.body);
     if (body.get('grant_type') === 'authorization_code') {
       return json({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600, scope: 'https://www.googleapis.com/auth/gmail.readonly' });
+    }
+    if (revokeNext) {
+      revokeNext = false;
+      return json({ error: 'invalid_grant', error_description: 'Token has been expired or revoked.' }, 400);
     }
     return json({ access_token: 'at-2', expires_in: 3600 });
   }
@@ -141,7 +146,7 @@ async function main() {
 
   const status = await gmail.getStatus(env);
   assert.equal(status.accounts.length, 1);
-  assert.match(status.accounts[0].lastScanSummary, /0 imported from 0 new emails/);
+  assert.match(status.accounts[0].lastScanSummary, /0 receipts from 0 new emails/);
   assert.ok(!JSON.stringify(status).includes('rt-1'), 'status must not leak tokens');
 
   // A held lock skips the scan.
@@ -155,6 +160,18 @@ async function main() {
   calls.length = 0;
   await gmail.scanAll(plainEnv, async () => ({ key: 'k' }));
   assert.ok(!calls.some((c) => c.includes('browser-rendering')));
+
+  // A revoked refresh token flags the account for reconnecting.
+  const revokedEnv = { ...plainEnv, GMAIL_STATE: memoryKv() };
+  await gmail.exchangeCode(revokedEnv, 'https://receipts.example/gmail/callback', 'c');
+  const stored = JSON.parse(await revokedEnv.GMAIL_STATE.get('gmail_accounts'));
+  stored[0].expiresAt = 0;
+  await revokedEnv.GMAIL_STATE.put('gmail_accounts', JSON.stringify(stored));
+  revokeNext = true;
+  const revokedScan = await gmail.scanAll(revokedEnv, async () => ({ key: 'k' }));
+  assert.equal(revokedScan.accounts[0].failed, true);
+  const revokedStatus = await gmail.getStatus(revokedEnv);
+  assert.equal(revokedStatus.accounts[0].needsReconnect, true);
 
   assert.equal(await gmail.removeAccount(env, 'someone@example.com'), true);
   assert.equal((await gmail.getStatus(env)).accounts.length, 0);
