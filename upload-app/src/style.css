@@ -808,15 +808,14 @@ select {
   border-radius: var(--radius);
   padding: 10px 14px;
   background: var(--surface);
-  box-shadow: inset 3px 0 0 var(--border-strong);
 }
 
 .match-review-item.is-clear {
-  box-shadow: inset 3px 0 0 var(--success);
+  border-color: var(--success-border);
 }
 
 .match-review-item.is-ambiguous {
-  box-shadow: inset 3px 0 0 var(--warn);
+  border-color: var(--warn-border);
 }
 
 .match-review-claim,
@@ -1270,12 +1269,6 @@ select {
   border-color: var(--accent);
 }
 
-/* Linked rows */
-.receipt-list li.linked,
-.todo-item.linked {
-  box-shadow: inset 3px 0 0 var(--success);
-}
-
 .link-indicator {
   display: flex;
   align-items: center;
@@ -1296,25 +1289,21 @@ select {
 .receipt-list li.match-best,
 .todo-item.match-best {
   background: var(--success-soft);
-  box-shadow: inset 3px 0 0 var(--success);
 }
 
 .receipt-list li.match-amount,
 .todo-item.match-amount {
   background: var(--accent-soft);
-  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .receipt-list li.match-date,
 .todo-item.match-date {
   background: var(--warn-soft);
-  box-shadow: inset 3px 0 0 var(--warn);
 }
 
 .receipt-list li.match-date-near,
 .todo-item.match-date-near {
   background: var(--warn-soft);
-  box-shadow: inset 3px 0 0 var(--warn-border);
 }
 
 .match-badge {
@@ -2306,7 +2295,6 @@ body.selecting .claims-view {
 
 /* Row states */
 .invoice-doc-table tbody tr.inv-row-reviewed td:first-child {
-  box-shadow: inset 3px 0 0 var(--success);
 }
 
 .inv-row-stale td {
@@ -2314,7 +2302,6 @@ body.selecting .claims-view {
 }
 
 .invoice-doc-table tbody tr.inv-row-stale td:first-child {
-  box-shadow: inset 3px 0 0 var(--warn);
 }
 
 /* Full-width strip under a reviewed line whose source data changed */
@@ -2894,11 +2881,6 @@ body.selecting .claims-view {
 
   .invoice-doc-table tbody tr.inv-row-reviewed {
     border-color: var(--success-border);
-  }
-
-  .invoice-doc-table tbody tr.inv-row-reviewed td:first-child,
-  .invoice-doc-table tbody tr.inv-row-stale td:first-child {
-    box-shadow: none;
   }
 
   .invoice-doc-table tbody tr.inv-row-stale {
