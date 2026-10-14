@@ -165,13 +165,12 @@ export function escapeHtml(str) {
   return div.innerHTML;
 }
 
+const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// "14 Sep 2026": unambiguous day-first form regardless of the browser locale.
 export function formatDateForLocale(date) {
-  return new Intl.DateTimeFormat(undefined, {
-    year: 'numeric',
-    month: 'numeric',
-    day: 'numeric',
-    timeZone: 'UTC',
-  }).format(date);
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '';
+  return `${date.getUTCDate()} ${MONTH_SHORT[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
 }
 
 export function formatCurrencyAmount(currency, amount) {

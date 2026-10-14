@@ -371,8 +371,11 @@ export async function loadReceipts() {
         const usdUnderName = r.taggedCurrency === 'USD' && taggedAmount !== null
           ? `<span class="receipt-usd-tag">${escapeHtml(formatCurrencyAmount('USD', taggedAmount))}</span>`
           : '';
+        // Lead with what the receipt is for; the filename stays visible beneath
+        // so a specific PDF can still be found.
+        const primaryTitle = titleLabel || name;
         const titleUnderName = titleLabel
-          ? `<span class="receipt-title-tag">${escapeHtml(titleLabel)}</span>`
+          ? `<span class="receipt-title-tag">${escapeHtml(name)}</span>`
           : '';
         const linkBtnIcon = `<svg class="icon-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
@@ -396,7 +399,7 @@ export async function loadReceipts() {
               <span class="checkmark">✓</span>
             </span>
             <div class="receipt-info">
-              <span class="receipt-name">${escapeHtml(name)}</span>
+              <span class="receipt-name">${escapeHtml(primaryTitle)}</span>
               ${titleUnderName}
               ${usdUnderName}
             </div>
@@ -698,8 +701,8 @@ function renderLinkedPairs() {
               data-receipt-key="${escapeHtml(receipt.key)}"
               data-receipt-name="${escapeHtml(receiptName)}"
               title="Preview receipt">
-            <span class="linked-pair-title">${escapeHtml(receiptName)}</span>
-            <span class="linked-pair-sub">${escapeHtml(receiptTitle || 'Receipt')}</span>
+            <span class="linked-pair-title">${escapeHtml(receiptTitle || receiptName)}</span>
+            <span class="linked-pair-sub">${escapeHtml(receiptTitle ? receiptName : 'Receipt')}</span>
             <span class="linked-pair-meta">${escapeHtml(receiptDateInfo.text)} · ${escapeHtml(receiptAmount)}</span>
           </button>
           <button type="button" class="linked-pair-unlink"
@@ -1140,7 +1143,7 @@ function updateActionBar() {
   if (linkingSource === 'receipt') {
     const selectionCount = selectedClaimIds.size;
     if (selectionCount === 0) {
-      actionText.textContent = 'Receipt selected. Tick a claim or mark ready';
+      actionText.textContent = 'Tick the claim this receipt belongs to, or mark it ready to claim without one';
       confirmSelection.hidden = true;
       confirmSelection.disabled = true;
       markReadySelection.textContent = 'Mark ready';
@@ -1163,7 +1166,7 @@ function updateActionBar() {
 
   const selectionCount = selectedReceiptKeys.size;
   if (selectionCount === 0) {
-    actionText.textContent = 'Claim selected. Tick receipt(s) to link';
+    actionText.textContent = 'Tick the receipt(s) for this claim';
     confirmSelection.hidden = true;
     confirmSelection.disabled = true;
     return;
@@ -1411,10 +1414,14 @@ function renderOutstandingClaims() {
     return;
   }
 
+  // The account line only earns its space when claims come from more than one account.
+  const distinctAccounts = new Set(visibleClaims.map((t) => (t.accountName || '').trim() || 'Unknown account'));
+  const showAccount = distinctAccounts.size > 1;
   todoList.innerHTML = visibleClaims
     .map((t) => {
       const accountName = (t.accountName || '').trim();
       const accountLabel = accountName || 'Unknown account';
+      const accountLine = showAccount ? `<span class="todo-account">${escapeHtml(accountLabel)}</span>` : '';
       const linkBtnIcon = `<svg class="icon-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
               <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
@@ -1429,7 +1436,7 @@ function renderOutstandingClaims() {
           <div class="todo-content">
             <span class="todo-payee">${escapeHtml(t.description)}</span>
             <span class="todo-desc">${escapeHtml(t.payee)}</span>
-            <span class="todo-account">Account: ${escapeHtml(accountLabel)}</span>
+            ${accountLine}
           </div>
           <div class="todo-actions">
             <div class="todo-meta">
@@ -1652,17 +1659,22 @@ function handleClaimLinkBtnClick(e, li) {
   startClaimLinkFlow(claimId);
 }
 
-// Handle claim click - toggle target selection while linking from receipt
-function handleClaimClick(_e, li) {
+// Handle claim click: toggle target selection while linking from a receipt,
+// otherwise start linking from this claim (the row is the big tap target).
+function handleClaimClick(e, li) {
+  if (e.target.closest('.claim-link-btn')) return;
+  const claimId = li.dataset.claimId;
   if (linkingSource === 'receipt' && sourceReceiptKey) {
-    const claimId = li.dataset.claimId;
     if (selectedClaimIds.has(claimId)) {
       selectedClaimIds.delete(claimId);
     } else {
       selectedClaimIds.add(claimId);
     }
     applyLinkingHighlights();
+    return;
   }
+  if (linkingSource === 'claim' && sourceClaimId === claimId) return;
+  startClaimLinkFlow(claimId);
 }
 
 // Step 1 from receipt side: pick source receipt, then choose claim target(s)

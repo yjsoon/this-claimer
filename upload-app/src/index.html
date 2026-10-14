@@ -162,7 +162,10 @@
     </div>
 
     <div class="linked-section">
-      <h2>Ready to Claim <span id="linkedCount">(0)</span></h2>
+      <div class="section-heading">
+        <h2>Ready to Claim <span id="linkedCount">(0)</span></h2>
+        <a href="/invoices" class="section-link">Invoice these in Xero<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></a>
+      </div>
       <ul id="linkedList" class="linked-pair-list"></ul>
     </div>
 
@@ -174,7 +177,7 @@
         </div>
       </div>
       <div id="actionBar" class="action-bar">
-        <span id="actionText">Select a claim to link</span>
+        <span id="actionText">Pick a claim or receipt to link</span>
         <div class="action-buttons">
           <button id="confirmSelection" class="btn-primary" hidden>Link selected</button>
           <button id="markReadySelection" class="btn-primary" hidden>Mark ready</button>

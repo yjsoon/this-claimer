@@ -338,6 +338,20 @@ h2 > span {
   color: var(--danger);
 }
 
+/* With a pointer, the destructive control stays out of the way until the row is hovered or focused */
+@media (hover: hover) and (pointer: fine) {
+  .receipt-list li .delete-btn {
+    opacity: 0;
+    transition: opacity 0.12s ease, background 0.15s, color 0.15s, border-color 0.15s;
+  }
+
+  .receipt-list li:hover .delete-btn,
+  .receipt-list li:focus-within .delete-btn,
+  .receipt-list li .delete-btn:focus-visible {
+    opacity: 1;
+  }
+}
+
 /* Chips: small status labels */
 .chip,
 .receipt-usd-tag,
@@ -1332,9 +1346,42 @@ select {
   overflow: hidden;
 }
 
-.linked-section > h2 {
+.linked-section > h2,
+.section-heading {
   padding: 14px 18px 12px;
   border-bottom: 1px solid var(--border);
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.section-heading h2 {
+  margin: 0;
+}
+
+.section-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+}
+
+.section-link svg {
+  width: 14px;
+  height: 14px;
+}
+
+.section-link:hover {
+  background: var(--accent-soft);
 }
 
 .linked-section .empty-state {
@@ -2573,7 +2620,8 @@ body.selecting .claims-view {
   }
 
   .list-column > h2,
-  .linked-section > h2 {
+  .linked-section > h2,
+  .section-heading {
     padding: 12px 14px 10px;
   }
 
