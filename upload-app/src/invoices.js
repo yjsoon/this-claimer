@@ -2196,7 +2196,7 @@ function updateModeNav(activeInvoices) {
 }
 
 function updateAppTitle(invoices) {
-  document.title = invoices ? 'Invoices — Receipt Upload' : 'Claims — Receipt Upload';
+  document.title = invoices ? 'Invoices · Claimer' : 'Claims · Claimer';
 }
 
 export function navigateToMode(invoices, { replace = false, refresh = true } = {}) {

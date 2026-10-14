@@ -434,7 +434,7 @@ select {
   position: sticky;
   top: 0;
   z-index: 40;
-  margin: 0 calc(-1 * max(24px, env(safe-area-inset-left, 0px))) 20px calc(-1 * max(24px, env(safe-area-inset-right, 0px)));
+  margin: 0 calc(-1 * max(24px, env(safe-area-inset-right, 0px))) 20px calc(-1 * max(24px, env(safe-area-inset-left, 0px)));
   padding: max(10px, env(safe-area-inset-top, 0px)) max(24px, env(safe-area-inset-right, 0px)) 10px max(24px, env(safe-area-inset-left, 0px));
   background: var(--header-bg);
   backdrop-filter: saturate(160%) blur(12px);
@@ -2539,7 +2539,7 @@ body.selecting .claims-view {
   }
 
   .app-header {
-    margin: 0 calc(-1 * max(12px, env(safe-area-inset-left, 0px))) 12px calc(-1 * max(12px, env(safe-area-inset-right, 0px)));
+    margin: 0 calc(-1 * max(12px, env(safe-area-inset-right, 0px))) 12px calc(-1 * max(12px, env(safe-area-inset-left, 0px)));
     padding: max(8px, env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) 8px max(12px, env(safe-area-inset-left, 0px));
   }
 
