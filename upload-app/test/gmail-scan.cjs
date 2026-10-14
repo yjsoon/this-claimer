@@ -110,7 +110,7 @@ async function main() {
     CF_BROWSER_RENDERING_TOKEN: 'br-token',
   };
 
-  const authorizeUrl = new URL(gmail.buildAuthorizeUrl(env, 'https://receipts.example/gmail/connect', 'state-1'));
+  const authorizeUrl = new URL(await gmail.buildAuthorizeUrl(env, 'https://receipts.example/gmail/connect', 'state-1'));
   assert.equal(authorizeUrl.searchParams.get('redirect_uri'), 'https://receipts.example/gmail/callback');
   assert.equal(authorizeUrl.searchParams.get('access_type'), 'offline');
   assert.equal(authorizeUrl.searchParams.get('scope'), 'https://www.googleapis.com/auth/gmail.readonly');
@@ -144,7 +144,7 @@ async function main() {
   assert.equal(second.accounts[0].checked, 0);
   assert.equal(imported.length, 3);
 
-  const status = await gmail.getStatus(env);
+  const status = await gmail.getStatus(env, 'https://receipts.example/');
   assert.equal(status.accounts.length, 1);
   assert.match(status.accounts[0].lastScanSummary, /0 receipts from 0 new emails/);
   assert.ok(!JSON.stringify(status).includes('rt-1'), 'status must not leak tokens');
@@ -170,11 +170,28 @@ async function main() {
   revokeNext = true;
   const revokedScan = await gmail.scanAll(revokedEnv, async () => ({ key: 'k' }));
   assert.equal(revokedScan.accounts[0].failed, true);
-  const revokedStatus = await gmail.getStatus(revokedEnv);
+  const revokedStatus = await gmail.getStatus(revokedEnv, 'https://receipts.example/');
   assert.equal(revokedStatus.accounts[0].needsReconnect, true);
 
+  // The OAuth client can be saved from the app when no Worker secrets are set.
+  const appEnv = { GMAIL_STATE: memoryKv() };
+  assert.equal(await gmail.isConfigured(appEnv), false);
+  await assert.rejects(gmail.saveClient(appEnv, 'not-a-client-id', 'GOCSPX-abcdefghij'), gmail.GmailClientInputError);
+  await gmail.saveClient(appEnv, ' 123-abc.apps.googleusercontent.com ', 'GOCSPX-abcdefghij');
+  const appStatus = await gmail.getStatus(appEnv, 'https://receipts.example/x');
+  assert.equal(appStatus.configured, true);
+  assert.equal(appStatus.clientSource, 'app');
+  assert.equal(appStatus.clientId, '123-abc.apps.googleusercontent.com');
+  assert.equal(appStatus.redirectUri, 'https://receipts.example/gmail/callback');
+  assert.ok(!JSON.stringify(appStatus).includes('GOCSPX'), 'status must not return the client secret');
+  const appAuthorize = new URL(await gmail.buildAuthorizeUrl(appEnv, 'https://receipts.example/', 's'));
+  assert.equal(appAuthorize.searchParams.get('client_id'), '123-abc.apps.googleusercontent.com');
+  await assert.rejects(gmail.saveClient(env, '123-abc.apps.googleusercontent.com', 'GOCSPX-abcdefghij'), gmail.GmailClientInputError);
+  await gmail.clearClient(appEnv);
+  assert.equal(await gmail.isConfigured(appEnv), false);
+
   assert.equal(await gmail.removeAccount(env, 'someone@example.com'), true);
-  assert.equal((await gmail.getStatus(env)).accounts.length, 0);
+  assert.equal((await gmail.getStatus(env, 'https://receipts.example/')).accounts.length, 0);
 
   console.log('Gmail scan contract passed');
 }

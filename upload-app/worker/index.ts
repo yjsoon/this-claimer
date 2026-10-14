@@ -1373,7 +1373,7 @@ function getCorsHeaders(request: Request, env: Env): Record<string, string> {
 
   return {
     'Access-Control-Allow-Origin': effectiveOrigin,
-    'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, X-Auth-Token',
     Vary: 'Origin', // Prevent caches from serving wrong CORS headers
   };
@@ -2444,19 +2444,16 @@ export default {
       // POST /gmail/connect - begin linking a Gmail account. Same pattern as
       // /xero/connect: header-authed, CSRF state in an HttpOnly cookie.
       if (path === '/gmail/connect' && request.method === 'POST') {
-        if (!gmail.isConfigured(env)) {
+        if (!(await gmail.isConfigured(env))) {
           return jsonResponse(
-            {
-              error:
-                'Gmail is not configured on this deployment (needs the GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET secrets and the GMAIL_STATE KV binding).',
-            },
+            { error: 'Gmail import is not set up yet. Add the Google client ID and secret in the Gmail panel first.' },
             corsHeaders,
             503
           );
         }
         const state = crypto.randomUUID();
         const secure = url.protocol === 'https:' ? '; Secure' : '';
-        return new Response(JSON.stringify({ authorizeUrl: gmail.buildAuthorizeUrl(env, request.url, state) }), {
+        return new Response(JSON.stringify({ authorizeUrl: await gmail.buildAuthorizeUrl(env, request.url, state) }), {
           headers: {
             ...corsHeaders,
             'Content-Type': 'application/json',
@@ -2503,7 +2500,31 @@ export default {
 
       // GET /gmail/status - linked accounts and their last scan
       if (path === '/gmail/status' && request.method === 'GET') {
-        return jsonResponse(await gmail.getStatus(env), corsHeaders);
+        return jsonResponse(await gmail.getStatus(env, request.url), corsHeaders);
+      }
+
+      // PUT /gmail/client { clientId, clientSecret } - save the Google OAuth
+      // client from the app (ignored when the Worker secrets are set).
+      // DELETE /gmail/client - forget it.
+      if (path === '/gmail/client' && request.method === 'PUT') {
+        const body = (await request.json().catch(() => ({}))) as { clientId?: unknown; clientSecret?: unknown };
+        try {
+          await gmail.saveClient(
+            env,
+            typeof body.clientId === 'string' ? body.clientId : '',
+            typeof body.clientSecret === 'string' ? body.clientSecret : ''
+          );
+        } catch (err) {
+          if (err instanceof gmail.GmailClientInputError) {
+            return jsonResponse({ error: err.message }, corsHeaders, 400);
+          }
+          throw err;
+        }
+        return jsonResponse({ success: true }, corsHeaders);
+      }
+      if (path === '/gmail/client' && request.method === 'DELETE') {
+        await gmail.clearClient(env);
+        return jsonResponse({ success: true }, corsHeaders);
       }
 
       // POST /gmail/disconnect { email } - unlink one account

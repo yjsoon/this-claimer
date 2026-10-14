@@ -28,7 +28,8 @@ AUTH_PASSWORD = "your-web-app-password"
 # VISION_PROVIDER in wrangler.toml.
 # MINIMAX_API_KEY = "..."
 
-# Optional: Gmail receipt import. Google Cloud OAuth client (Web application)
+# Optional: Gmail receipt import. The client can instead be pasted into the
+# Gmail panel in the app. Google Cloud OAuth client (Web application)
 # with the Gmail API enabled. Add BOTH redirect URIs to the client:
 #   https://receipts.soon.sg/gmail/callback   (production)
 #   http://localhost:8787/gmail/callback       (wrangler dev default port)

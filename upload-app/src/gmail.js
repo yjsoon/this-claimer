@@ -12,6 +12,15 @@ const accountList = document.getElementById('gmailAccountList');
 const intro = document.getElementById('gmailIntro');
 const connectBtn = document.getElementById('gmailConnectBtn');
 const scanBtn = document.getElementById('gmailScanBtn');
+const setupForm = document.getElementById('gmailSetup');
+const redirectEl = document.getElementById('gmailRedirectUri');
+const copyRedirectBtn = document.getElementById('gmailCopyRedirect');
+const clientIdInput = document.getElementById('gmailClientId');
+const clientSecretInput = document.getElementById('gmailClientSecret');
+const setupSaveBtn = document.getElementById('gmailSetupSave');
+const setupCancelBtn = document.getElementById('gmailSetupCancel');
+const setupNote = document.getElementById('gmailSetupNote');
+const clientInfo = document.getElementById('gmailClientInfo');
 
 const LINK_ERRORS = {
   access_denied: "Gmail wasn't linked. You cancelled or didn't allow access.",
@@ -22,6 +31,8 @@ const LINK_ERRORS = {
 let onImported = () => {};
 let scanning = false;
 let openedForAttention = false;
+let editingClient = false;
+let lastStatus = null;
 
 export function setOnGmailImported(fn) {
   onImported = fn;
@@ -70,20 +81,51 @@ function renderAccount(a) {
     </li>`;
 }
 
+function renderSetup(data) {
+  // The form shows when no client is set yet, or when "Change" was clicked
+  // for a client saved from the app (Worker-secret clients are changed there).
+  const showForm = !data.configured || editingClient;
+  setupForm.hidden = !showForm;
+  redirectEl.textContent = data.redirectUri || `${location.origin}/gmail/callback`;
+  setupCancelBtn.hidden = !data.configured;
+  setupNote.hidden = !(data.configured && (data.accounts || []).length);
+  if (showForm && !clientIdInput.value && data.clientSource === 'app') clientIdInput.value = data.clientId || '';
+
+  if (data.configured && data.clientSource === 'app' && !editingClient) {
+    clientInfo.hidden = false;
+    clientInfo.innerHTML = `Google client <code>${escapeHtml(shortClientId(data.clientId))}</code> · <button type="button" class="link-button" id="gmailChangeClient">Change</button>`;
+    document.getElementById('gmailChangeClient').addEventListener('click', () => {
+      editingClient = true;
+      renderStatus(lastStatus);
+      clientIdInput.focus();
+    });
+  } else {
+    clientInfo.hidden = true;
+    clientInfo.innerHTML = '';
+  }
+}
+
+function shortClientId(id = '') {
+  const prefix = id.replace(/\.apps\.googleusercontent\.com$/, '');
+  return prefix.length > 16 ? `${prefix.slice(0, 12)}…` : prefix;
+}
+
 function renderStatus(data) {
+  lastStatus = data;
+  renderSetup(data);
   const accounts = Array.isArray(data.accounts) ? data.accounts : [];
   const needsAttention = accounts.some((a) => a.needsReconnect || a.lastScanError);
 
   if (!data.configured) {
-    intro.textContent = "Gmail import isn't set up yet. Add the Google sign-in keys to the server to turn it on.";
+    intro.textContent = 'Gmail import needs a Google sign-in client. Set one up once, then link your Gmail accounts.';
   } else if (data.htmlReceipts) {
     intro.textContent = 'Receipts in your linked Gmail accounts are imported every 4 hours, including Grab and Gojek ride receipts.';
   } else {
     intro.textContent = "Receipt attachments in your linked Gmail accounts are imported every 4 hours. Grab and Gojek ride receipts aren't imported yet.";
   }
 
-  connectBtn.hidden = !data.configured;
-  scanBtn.hidden = !data.configured || accounts.length === 0;
+  connectBtn.hidden = !data.configured || editingClient;
+  scanBtn.hidden = !data.configured || editingClient || accounts.length === 0;
   connectBtn.disabled = scanning;
   scanBtn.disabled = scanning;
   countEl.textContent = accounts.length ? `(${accounts.length})` : '';
@@ -123,6 +165,42 @@ export async function loadGmailStatus() {
     intro.textContent = "Couldn't load Gmail accounts. Refresh to try again.";
     connectBtn.disabled = true;
     scanBtn.disabled = true;
+  }
+}
+
+async function saveClient(event) {
+  event.preventDefault();
+  setupSaveBtn.disabled = true;
+  try {
+    const res = await fetch(`${API_BASE}/gmail/client`, {
+      method: 'PUT',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientId: clientIdInput.value, clientSecret: clientSecretInput.value }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    editingClient = false;
+    clientSecretInput.value = '';
+    clientIdInput.value = '';
+    showStatus('success', 'Saved. Now link a Gmail account.');
+    await loadGmailStatus();
+    connectBtn.focus();
+  } catch (err) {
+    showStatus('error', err instanceof Error && !/^HTTP /.test(err.message) ? err.message : "Couldn't save. Try again.");
+  } finally {
+    setupSaveBtn.disabled = false;
+  }
+}
+
+async function copyRedirect() {
+  try {
+    await navigator.clipboard.writeText(redirectEl.textContent);
+    copyRedirectBtn.textContent = 'Copied';
+    setTimeout(() => {
+      copyRedirectBtn.textContent = 'Copy';
+    }, 1500);
+  } catch (_err) {
+    showStatus('error', "Couldn't copy. Select the address and copy it instead.");
   }
 }
 
@@ -207,6 +285,14 @@ export function initGmail() {
   toggleBtn.addEventListener('click', () => setOpen(section.hidden));
   connectBtn.addEventListener('click', connect);
   scanBtn.addEventListener('click', scanNow);
+  setupForm.addEventListener('submit', saveClient);
+  copyRedirectBtn.addEventListener('click', copyRedirect);
+  setupCancelBtn.addEventListener('click', () => {
+    editingClient = false;
+    clientSecretInput.value = '';
+    clientIdInput.value = '';
+    if (lastStatus) renderStatus(lastStatus);
+  });
 
   // Back from Google's consent screen: open the panel, report, tidy the URL.
   const params = new URLSearchParams(location.search);

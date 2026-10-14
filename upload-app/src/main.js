@@ -6,8 +6,8 @@ import {
   loadReceipts,
   loadYnabTodos,
   setOnClaimsLoadError,
-} from './claims.js?v=20261014-gmail-import';
-import { initGmail, loadGmailStatus, setOnGmailImported } from './gmail.js?v=20261014-gmail-import';
+} from './claims.js?v=20261014-gmail-setup';
+import { initGmail, loadGmailStatus, setOnGmailImported } from './gmail.js?v=20261014-gmail-setup';
 import {
   initInvoices,
   showInvoicesView,

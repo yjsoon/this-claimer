@@ -161,9 +161,11 @@ plus a **Scan now** button in the Gmail panel on the Claims page.
 - Setup: Google Cloud project with the Gmail API enabled; OAuth client of type
   Web application with redirect URI `https://receipts.yourdomain.com/gmail/callback`;
   consent screen published to "In production" (in Testing, refresh tokens
-  expire after 7 days); secrets `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`.
+  expire after 7 days). The client ID/secret can be pasted into the Gmail
+  panel (stored in KV via `PUT /gmail/client`, never returned by the API), or
+  set as Worker secrets `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`, which win.
 - Routes: `POST /gmail/connect`, `GET /gmail/callback`, `GET /gmail/status`,
-  `POST /gmail/disconnect`, `POST /gmail/scan`.
+  `POST /gmail/disconnect`, `POST /gmail/scan`, `PUT|DELETE /gmail/client`.
 
 ## Gmail Receipt Export
 

@@ -399,6 +399,7 @@ h2 > span {
 .invoice-sort-select,
 .inv-edit-input,
 .inv-edit-select,
+.gmail-input,
 .auth-modal input[type="password"] {
   background-color: var(--surface);
   color: var(--text);
@@ -414,6 +415,7 @@ h2 > span {
 .invoice-sort-select:focus,
 .inv-edit-input:focus,
 .inv-edit-select:focus,
+.gmail-input:focus,
 .auth-modal input[type="password"]:focus {
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
@@ -3408,4 +3410,105 @@ a.receipt-source-tag:hover {
 }
 .receipt-sub .receipt-title-tag {
   min-width: 0;
+}
+
+/* Gmail panel: one-time Google client setup */
+.gmail-setup {
+  margin-bottom: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.gmail-setup[hidden],
+.gmail-client-info[hidden] {
+  display: none;
+}
+
+.gmail-setup-steps {
+  margin: 0 0 12px;
+  padding-left: 20px;
+  font-size: 0.86rem;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+
+.gmail-setup-steps li + li {
+  margin-top: 4px;
+}
+
+.gmail-redirect {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.gmail-redirect code,
+.gmail-client-info code {
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--text);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.gmail-setup-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.gmail-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--font-size-meta);
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.gmail-input {
+  width: 100%;
+  font-size: 0.9rem;
+}
+
+.gmail-setup-note {
+  margin: 8px 0 0;
+  font-size: var(--font-size-meta);
+  color: var(--warn);
+}
+
+.gmail-setup-note[hidden] {
+  display: none;
+}
+
+.gmail-setup-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.gmail-setup-actions [hidden] {
+  display: none;
+}
+
+.gmail-client-info {
+  margin: 10px 0 0;
+  font-size: var(--font-size-meta);
+  color: var(--text-2);
+}
+
+@media (max-width: 700px) {
+  .gmail-setup-actions .btn-compact,
+  .gmail-redirect .btn-compact {
+    min-height: 40px;
+  }
+
+  .gmail-input {
+    font-size: 16px; /* stops iOS zooming into the field */
+  }
 }

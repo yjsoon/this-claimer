@@ -90,6 +90,9 @@ export interface GmailAccountStatus {
 
 export interface GmailStatus {
   configured: boolean;
+  clientSource?: 'secret' | 'app';
+  clientId?: string;
+  redirectUri: string;
   htmlReceipts: boolean;
   query: string;
   accounts: GmailAccountStatus[];
@@ -121,8 +124,64 @@ export interface GmailScanResult {
   accounts: GmailScanAccountResult[];
 }
 
-export function isConfigured(env: GmailEnv): boolean {
-  return Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.GMAIL_STATE);
+// --- Google OAuth client ------------------------------------------------------
+
+// The OAuth client comes from the GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET Worker
+// secrets when set; otherwise from KV, where the Gmail panel saves what the
+// user pastes in. The secret is write-only from the app: status never returns it.
+const CLIENT_KEY = 'gmail_oauth_client';
+const CLIENT_ID_RE = /^[\w.-]+\.apps\.googleusercontent\.com$/;
+
+interface GoogleClient {
+  id: string;
+  secret: string;
+  source: 'secret' | 'app';
+}
+
+async function loadClient(env: GmailEnv): Promise<GoogleClient | null> {
+  if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) {
+    return { id: env.GOOGLE_CLIENT_ID, secret: env.GOOGLE_CLIENT_SECRET, source: 'secret' };
+  }
+  if (!env.GMAIL_STATE) return null;
+  const raw = await env.GMAIL_STATE.get(CLIENT_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { id?: string; secret?: string };
+    return parsed.id && parsed.secret ? { id: parsed.id, secret: parsed.secret, source: 'app' } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function requireClient(env: GmailEnv): Promise<GoogleClient> {
+  const client = await loadClient(env);
+  if (!client) throw new Error('Gmail import is not set up: no Google OAuth client.');
+  return client;
+}
+
+export class GmailClientInputError extends Error {}
+
+export async function saveClient(env: GmailEnv, id: string, secret: string): Promise<void> {
+  if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) {
+    throw new GmailClientInputError('The Google client is set as Worker secrets; change it there instead.');
+  }
+  const clientId = id.trim();
+  const clientSecret = secret.trim();
+  if (!CLIENT_ID_RE.test(clientId)) {
+    throw new GmailClientInputError('That does not look like a Google client ID (it ends in .apps.googleusercontent.com).');
+  }
+  if (clientSecret.length < 10 || /\s/.test(clientSecret)) {
+    throw new GmailClientInputError('That does not look like a Google client secret.');
+  }
+  await env.GMAIL_STATE.put(CLIENT_KEY, JSON.stringify({ id: clientId, secret: clientSecret }));
+}
+
+export async function clearClient(env: GmailEnv): Promise<void> {
+  await env.GMAIL_STATE.delete(CLIENT_KEY);
+}
+
+export async function isConfigured(env: GmailEnv): Promise<boolean> {
+  return Boolean(env.GMAIL_STATE && (await loadClient(env)));
 }
 
 function htmlReceiptsEnabled(env: GmailEnv): boolean {
@@ -161,10 +220,14 @@ async function updateAccount(env: GmailEnv, email: string, patch: (account: Gmai
   await saveAccounts(env, accounts);
 }
 
-export async function getStatus(env: GmailEnv): Promise<GmailStatus> {
+export async function getStatus(env: GmailEnv, requestUrl: string): Promise<GmailStatus> {
   const accounts = await loadAccounts(env);
+  const client = env.GMAIL_STATE ? await loadClient(env) : null;
   return {
-    configured: isConfigured(env),
+    configured: Boolean(client),
+    clientSource: client?.source,
+    clientId: client?.id,
+    redirectUri: redirectUri(requestUrl),
     htmlReceipts: htmlReceiptsEnabled(env),
     query: receiptQuery(env),
     accounts: accounts.map((a) => ({
@@ -198,10 +261,11 @@ export function redirectUri(requestUrl: string): string {
   return `${new URL(requestUrl).origin}/gmail/callback`;
 }
 
-export function buildAuthorizeUrl(env: GmailEnv, requestUrl: string, state: string): string {
+export async function buildAuthorizeUrl(env: GmailEnv, requestUrl: string, state: string): Promise<string> {
+  const client = await requireClient(env);
   const params = new URLSearchParams({
     response_type: 'code',
-    client_id: env.GOOGLE_CLIENT_ID || '',
+    client_id: client.id,
     redirect_uri: redirectUri(requestUrl),
     scope: SCOPE,
     // offline + consent: always return a refresh token, even on a reconnect.
@@ -230,12 +294,13 @@ class GoogleTokenError extends Error {
 }
 
 async function tokenRequest(env: GmailEnv, body: Record<string, string>): Promise<GoogleTokenResponse> {
+  const client = await requireClient(env);
   const res = await fetch(TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
-      client_id: env.GOOGLE_CLIENT_ID || '',
-      client_secret: env.GOOGLE_CLIENT_SECRET || '',
+      client_id: client.id,
+      client_secret: client.secret,
       ...body,
     }).toString(),
   });
@@ -669,7 +734,7 @@ async function scanAccount(env: GmailEnv, email: string, importFile: ImportFile)
 // Scans every linked account (or just `onlyEmail`). A short KV lock keeps the
 // cron and a manual "Scan now" from importing the same email twice.
 export async function scanAll(env: GmailEnv, importFile: ImportFile, onlyEmail?: string): Promise<GmailScanResult> {
-  if (!isConfigured(env)) return { skipped: 'not_configured', accounts: [] };
+  if (!(await isConfigured(env))) return { skipped: 'not_configured', accounts: [] };
   const accounts = await loadAccounts(env);
   const targets = accounts.filter((a) => !onlyEmail || a.email === onlyEmail);
   if (!targets.length) return { skipped: 'no_accounts', accounts: [] };
