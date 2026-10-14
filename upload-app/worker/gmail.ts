@@ -704,7 +704,9 @@ async function scanAccount(env: GmailEnv, email: string, importFile: ImportFile)
           seen.add(id);
           newlySeen.push(id);
         } catch (error) {
-          // Leave the id unseen so the next scan retries it.
+          // Leave the id unseen so the next scan retries it, and hold the scan
+          // cursor back so the retry stays inside the search window.
+          result.more = true;
           result.errors.push(`${id}: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
@@ -726,7 +728,8 @@ async function scanAccount(env: GmailEnv, email: string, importFile: ImportFile)
     lastScanAt: new Date().toISOString(),
     lastScanSummary: fatal ? undefined : summarise(result),
     lastScanError: fatal,
-    needsReconnect: revoked || undefined,
+    // Keep an earlier "reconnect" flag through other failures; a clean scan clears it.
+    needsReconnect: revoked || (fatal ? current.needsReconnect : undefined),
   }));
   return result;
 }

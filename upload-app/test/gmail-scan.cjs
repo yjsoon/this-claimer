@@ -61,6 +61,7 @@ const attachments = { a1: PDF, a4: BIG_IMAGE };
 
 const calls = [];
 let revokeNext = false;
+let failTokenNext = false;
 global.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === 'string' ? input : input.url);
   calls.push(`${init.method || 'GET'} ${url.host}${url.pathname}`);
@@ -70,6 +71,10 @@ global.fetch = async (input, init = {}) => {
     const body = new URLSearchParams(init.body);
     if (body.get('grant_type') === 'authorization_code') {
       return json({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600, scope: 'https://www.googleapis.com/auth/gmail.readonly' });
+    }
+    if (failTokenNext) {
+      failTokenNext = false;
+      return json({ error: 'server_error' }, 503);
     }
     if (revokeNext) {
       revokeNext = false;
@@ -161,6 +166,28 @@ async function main() {
   await gmail.scanAll(plainEnv, async () => ({ key: 'k' }));
   assert.ok(!calls.some((c) => c.includes('browser-rendering')));
 
+  // A thrown import (e.g. storage outage) leaves the email unseen and holds the
+  // scan cursor back, so the next scan retries it.
+  const flakyEnv = { ...plainEnv, GMAIL_STATE: memoryKv() };
+  await gmail.exchangeCode(flakyEnv, 'https://receipts.example/gmail/callback', 'c');
+  let failOnce = true;
+  const flaky = await gmail.scanAll(flakyEnv, async () => {
+    if (failOnce) {
+      failOnce = false;
+      throw new Error('R2 unavailable');
+    }
+    return { key: 'k' };
+  });
+  assert.equal(flaky.accounts[0].more, true);
+  let flakyState = JSON.parse(await flakyEnv.GMAIL_STATE.get('gmail_accounts'))[0];
+  assert.equal(flakyState.lastCompleteScanAt, undefined);
+  assert.ok(!flakyState.seenIds.includes('m1'));
+  const retry = await gmail.scanAll(flakyEnv, async () => ({ key: 'k' }));
+  assert.deepEqual(retry.accounts[0].errors, []);
+  flakyState = JSON.parse(await flakyEnv.GMAIL_STATE.get('gmail_accounts'))[0];
+  assert.ok(flakyState.seenIds.includes('m1'));
+  assert.ok(flakyState.lastCompleteScanAt > 0);
+
   // A revoked refresh token flags the account for reconnecting.
   const revokedEnv = { ...plainEnv, GMAIL_STATE: memoryKv() };
   await gmail.exchangeCode(revokedEnv, 'https://receipts.example/gmail/callback', 'c');
@@ -172,6 +199,13 @@ async function main() {
   assert.equal(revokedScan.accounts[0].failed, true);
   const revokedStatus = await gmail.getStatus(revokedEnv, 'https://receipts.example/');
   assert.equal(revokedStatus.accounts[0].needsReconnect, true);
+  // A later non-revocation failure keeps the reconnect flag.
+  const keptState = JSON.parse(await revokedEnv.GMAIL_STATE.get('gmail_accounts'));
+  keptState[0].expiresAt = 0;
+  await revokedEnv.GMAIL_STATE.put('gmail_accounts', JSON.stringify(keptState));
+  failTokenNext = true;
+  await gmail.scanAll(revokedEnv, async () => ({ key: 'k' }));
+  assert.equal((await gmail.getStatus(revokedEnv, 'https://receipts.example/')).accounts[0].needsReconnect, true);
 
   // The OAuth client can be saved from the app when no Worker secrets are set.
   const appEnv = { GMAIL_STATE: memoryKv() };
