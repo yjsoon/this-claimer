@@ -21,6 +21,7 @@ The `.env` file contains secrets. When writing documentation or examples, always
 - `.agents/skills/ride-gmail-receipts/SKILL.md` - Agent mirror of the ride Gmail receipt export skill
 - `.agents/skills/claim-invoices/SKILL.md` - Agent mirror of the claim-invoices skill
 - `upload-app/worker/xero.ts` - Xero OAuth + bill creation/attachment for the Invoices tab
+- `upload-app/worker/gmail.ts` - Gmail OAuth (multiple accounts) + scheduled receipt import
 - `.env` - Local config (gitignored)
 - `.env.example` - Template with placeholders (safe to commit)
 
@@ -139,6 +140,30 @@ the checkbox remains the manual override):
 - The verdict is strictly "an explicit GST line is printed on the receipt" —
   never inferred from vendor or total. Note a USD receipt can legitimately show
   SG GST (overseas-vendor-registration suppliers like Fireworks AI).
+
+## Gmail Receipt Import (automatic)
+
+The worker can link one or more Gmail accounts (read-only) and import receipts
+into R2 on its own: a cron (`[triggers]` in `wrangler.toml`, every four hours)
+plus a **Scan now** button in the Gmail panel on the Claims page.
+
+- PDF/image attachments on emails matching `DEFAULT_RECEIPT_QUERY` in
+  `worker/gmail.ts` (override with the `GMAIL_RECEIPT_QUERY` var). Inline
+  images and images under 30 KB are ignored as logos.
+- Body-only Grab/Gojek ride receipts are printed to PDF through Cloudflare
+  Browser Rendering when the `CF_BROWSER_RENDERING_TOKEN` secret is set
+  (same rules as `scripts/export-ride-receipt.ts`; GrabFood excluded).
+- Imported receipts carry `source=gmail`, `gmailAccount`, `gmailMessageId`,
+  `gmailSubject` metadata and are tagged like manual uploads. Each Gmail
+  message is imported at most once (seen ids kept per account in KV).
+- Nothing is written to Gmail. First scan looks back
+  `GMAIL_INITIAL_LOOKBACK_DAYS` (default 14).
+- Setup: Google Cloud project with the Gmail API enabled; OAuth client of type
+  Web application with redirect URI `https://receipts.yourdomain.com/gmail/callback`;
+  consent screen published to "In production" (in Testing, refresh tokens
+  expire after 7 days); secrets `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`.
+- Routes: `POST /gmail/connect`, `GET /gmail/callback`, `GET /gmail/status`,
+  `POST /gmail/disconnect`, `POST /gmail/scan`.
 
 ## Gmail Receipt Export
 

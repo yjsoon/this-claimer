@@ -3199,3 +3199,99 @@ body.selecting .claims-view {
     animation-duration: 0.01ms !important;
   }
 }
+
+/* ---------- Gmail import ------------------------------------------------ */
+.gmail-section {
+  margin-bottom: 16px;
+  padding: 14px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.gmail-section[hidden] {
+  display: none;
+}
+
+.gmail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.gmail-header h2 {
+  margin: 0;
+}
+
+.gmail-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.gmail-intro {
+  margin: 8px 0 10px;
+  color: var(--text-2);
+  font-size: var(--font-size-meta);
+}
+
+.gmail-account-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gmail-account {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.gmail-account-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.gmail-account-email {
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.gmail-account-meta {
+  color: var(--text-3);
+  font-size: var(--font-size-meta);
+}
+
+.gmail-account-error {
+  color: var(--danger);
+}
+
+.gmail-empty {
+  color: var(--text-3);
+  font-size: var(--font-size-meta);
+}
+
+.receipt-source-tag {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: var(--font-size-meta);
+  text-decoration: none;
+}
+
+.receipt-source-tag:hover {
+  color: var(--accent);
+}

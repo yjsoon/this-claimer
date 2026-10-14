@@ -7,7 +7,8 @@
     "deploy": "wrangler deploy",
     "pages:dev": "wrangler pages dev src --compatibility-date=2024-01-01",
     "smoke:frontend": "node test/frontend-smoke.cjs",
-    "smoke:worker-claims": "node test/worker-claims.cjs"
+    "smoke:worker-claims": "node test/worker-claims.cjs",
+    "test:gmail": "node test/gmail-scan.cjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260911.1",

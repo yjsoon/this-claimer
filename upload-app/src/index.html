@@ -30,10 +30,11 @@
       document.documentElement.dataset.themePreference = preference;
     })();
   </script>
-  <link rel="stylesheet" href="/style.css?v=20261014-layout-refresh">
+  <link rel="stylesheet" href="/style.css?v=20261014-gmail-import">
   <!-- Preload the module graph so it loads in one round instead of a three-level waterfall -->
-  <link rel="modulepreload" href="/main.js?v=20260915-two-line-invoices">
-  <link rel="modulepreload" href="/claims.js?v=20260914-preview-review">
+  <link rel="modulepreload" href="/main.js?v=20261014-gmail-import">
+  <link rel="modulepreload" href="/claims.js?v=20261014-gmail-import">
+  <link rel="modulepreload" href="/gmail.js?v=20261014-gmail-import">
   <link rel="modulepreload" href="/invoices.js?v=20260915-two-line-invoices">
   <link rel="modulepreload" href="/lib/constants.js">
   <link rel="modulepreload" href="/lib/core.js">
@@ -102,10 +103,23 @@
         </p>
       </div>
       <div class="claims-toolbar-actions">
+        <button id="gmailToggleBtn" class="btn-secondary btn-compact" type="button" aria-expanded="false" aria-controls="gmailSection">Gmail</button>
         <button id="findMatchesBtn" class="btn-secondary btn-compact" type="button">Find matches</button>
         <button id="refreshBtn" class="btn-refresh" type="button">Refresh</button>
       </div>
     </div>
+
+    <section id="gmailSection" class="gmail-section" hidden>
+      <div class="gmail-header">
+        <h2>Gmail import</h2>
+        <div class="gmail-actions">
+          <button id="gmailScanBtn" class="btn-secondary btn-compact" type="button">Scan now</button>
+          <button id="gmailConnectBtn" class="btn-primary btn-compact" type="button">Link account</button>
+        </div>
+      </div>
+      <p id="gmailIntro" class="gmail-intro">Checking Gmail…</p>
+      <ul id="gmailAccountList" class="gmail-account-list"></ul>
+    </section>
 
     <section id="matchReviewSection" class="match-review-section" hidden>
       <div class="match-review-header">
@@ -243,6 +257,6 @@
     </div>
   </div>
 
-  <script type="module" src="/main.js?v=20260915-two-line-invoices"></script>
+  <script type="module" src="/main.js?v=20261014-gmail-import"></script>
 </body>
 </html>

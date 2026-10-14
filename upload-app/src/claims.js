@@ -377,6 +377,9 @@ export async function loadReceipts() {
         const titleUnderName = titleLabel
           ? `<span class="receipt-title-tag">${escapeHtml(name)}</span>`
           : '';
+        const gmailTag = r.source === 'gmail' && r.gmailAccount && r.gmailMessageId
+          ? `<a class="receipt-source-tag" target="_blank" rel="noopener" href="https://mail.google.com/mail/?authuser=${encodeURIComponent(r.gmailAccount)}#all/${encodeURIComponent(r.gmailMessageId)}" title="${escapeHtml(`${r.gmailAccount}${r.gmailSubject ? `: ${r.gmailSubject}` : ''}`)}">From Gmail</a>`
+          : '';
         const linkBtnIcon = `<svg class="icon-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
               <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
@@ -402,6 +405,7 @@ export async function loadReceipts() {
               <span class="receipt-name">${escapeHtml(primaryTitle)}</span>
               ${titleUnderName}
               ${usdUnderName}
+              ${gmailTag}
             </div>
             <div class="receipt-actions">
               <div class="receipt-meta">
@@ -426,6 +430,7 @@ export async function loadReceipts() {
       li.querySelector('.receipt-date').addEventListener('click', (e) => handleDateOverrideClick(e, li));
       li.querySelector('.link-btn').addEventListener('click', (e) => handleLinkBtnClick(e, li));
       li.querySelector('.delete-btn').addEventListener('click', (e) => handleDeleteBtnClick(e, li));
+      li.querySelector('.receipt-source-tag')?.addEventListener('click', (e) => e.stopPropagation());
     });
 
     // Which claims are outstanding depends on receipt links, so re-render that

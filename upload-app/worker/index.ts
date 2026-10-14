@@ -2,6 +2,7 @@ import { getAssetFromKV } from '@cloudflare/kv-asset-handler';
 // @ts-ignore
 import manifestJSON from '__STATIC_CONTENT_MANIFEST';
 import * as xero from './xero';
+import * as gmail from './gmail';
 import { PDFDocument } from 'pdf-lib';
 
 const assetManifest = JSON.parse(manifestJSON);
@@ -107,6 +108,15 @@ interface Env {
   XERO_CLIENT_SECRET: string;
   XERO_SCOPES?: string;
   XERO_INPUT_TAXTYPE?: string;
+  // Gmail receipt import (see worker/gmail.ts). GOOGLE_CLIENT_ID/SECRET and
+  // CF_BROWSER_RENDERING_TOKEN are secrets; GMAIL_STATE holds linked accounts.
+  GMAIL_STATE: KVNamespace;
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
+  GMAIL_RECEIPT_QUERY?: string;
+  GMAIL_INITIAL_LOOKBACK_DAYS?: string;
+  CF_ACCOUNT_ID?: string;
+  CF_BROWSER_RENDERING_TOKEN?: string;
 }
 
 interface YnabTransaction {
@@ -217,6 +227,10 @@ interface ReceiptSummary {
   uploaded: string;
   storageUploaded: string;
   originalName?: string;
+  source?: string;
+  gmailAccount?: string;
+  gmailMessageId?: string;
+  gmailSubject?: string;
   linkedClaimId?: string;
   linkedClaimIds: string[];
   linkedClaimsBackend?: ClaimsBackend;
@@ -610,6 +624,10 @@ async function listReceiptSummaries(
         uploaded: metadata.uploadedAt || obj.uploaded.toISOString(),
         storageUploaded: obj.uploaded.toISOString(),
         originalName: metadata.originalName,
+        source: metadata.source,
+        gmailAccount: metadata.gmailAccount,
+        gmailMessageId: metadata.gmailMessageId,
+        gmailSubject: metadata.gmailSubject,
         linkedClaimId: primaryLinkedClaimId,
         linkedClaimIds,
         linkedClaimsBackend:
@@ -1854,7 +1872,56 @@ async function markYnabClaimed(
   }
 }
 
+// --- Gmail receipt import -----------------------------------------------------
+
+// Stores one file found by the Gmail scan the same way POST /upload does, and
+// queues amount/GST tagging for it.
+function gmailImporter(env: Env, ctx: ExecutionContext): gmail.ImportFile {
+  return async (file) => {
+    if (file.bytes.byteLength > MAX_FILE_SIZE) return { error: 'file too large' };
+    const mimeType = normaliseMimeType(file.mimeType);
+    const ext = getUploadExtension(file.filename, mimeType) || MIME_EXT[mimeType] || '';
+    if (!ext) return { error: 'unsupported file type' };
+    if (!validateMagicBytes(file.bytes, mimeType)) return { error: 'content does not match its type' };
+
+    const key = generateKey(buildStorageFilename(file.filename, ext));
+    const subject = sanitiseLabel(file.subject, 80);
+    await env.RECEIPTS.put(key, file.bytes, {
+      httpMetadata: { contentType: mimeType || EXT_MIME[ext] || 'application/octet-stream' },
+      customMetadata: {
+        originalName: file.filename,
+        uploadedAt: new Date().toISOString(),
+        source: 'gmail',
+        gmailAccount: file.account,
+        gmailMessageId: file.messageId,
+        // R2 caps custom metadata at 2 KB in total, so keep this short.
+        ...(subject ? { gmailSubject: subject } : {}),
+      },
+    });
+    ctx.waitUntil(tagReceiptAmount(env, key));
+    return { key };
+  };
+}
+
+function jsonResponse(body: unknown, corsHeaders: Record<string, string>, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  });
+}
+
 export default {
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    const result = await gmail.scanAll(env, gmailImporter(env, ctx));
+    for (const account of result.accounts) {
+      console.log(
+        `gmail scan ${account.email}: ${account.imported.length} imported, ${account.checked} checked` +
+          (account.errors.length ? `, errors: ${account.errors.join('; ')}` : '')
+      );
+    }
+    if (result.skipped) console.log(`gmail scan skipped: ${result.skipped}`);
+  },
+
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -1874,14 +1941,15 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // Check auth for API routes. /xero/* is gated too, EXCEPT /xero/callback,
+    // Check auth for API routes. /xero/* and /gmail/* are gated too, EXCEPT their /callback,
     // which Xero itself calls and which is trusted via its one-time state cookie.
     // (/xero/connect is a header-authed POST so the auth token never lands in a URL.)
     const isApiRoute =
       ['/upload', '/list', '/receipt/', '/ynab/', '/amount-tags/', '/gst-tags/', '/agent/'].some(
         (route) => path === route || path.startsWith(route)
       ) ||
-      (path.startsWith('/xero/') && path !== '/xero/callback');
+      (path.startsWith('/xero/') && path !== '/xero/callback') ||
+      (path.startsWith('/gmail/') && path !== '/gmail/callback');
 
     if (isApiRoute && !validateAuth(request, env)) {
       return new Response(JSON.stringify({ error: 'Unauthorized' }), {
@@ -2369,6 +2437,85 @@ export default {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         }
+      }
+
+      // --- Gmail receipt import ---------------------------------------------
+
+      // POST /gmail/connect - begin linking a Gmail account. Same pattern as
+      // /xero/connect: header-authed, CSRF state in an HttpOnly cookie.
+      if (path === '/gmail/connect' && request.method === 'POST') {
+        if (!gmail.isConfigured(env)) {
+          return jsonResponse(
+            {
+              error:
+                'Gmail is not configured on this deployment (needs the GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET secrets and the GMAIL_STATE KV binding).',
+            },
+            corsHeaders,
+            503
+          );
+        }
+        const state = crypto.randomUUID();
+        const secure = url.protocol === 'https:' ? '; Secure' : '';
+        return new Response(JSON.stringify({ authorizeUrl: gmail.buildAuthorizeUrl(env, request.url, state) }), {
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store',
+            'Referrer-Policy': 'no-referrer',
+            'Set-Cookie': `gmail_oauth_state=${state}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600${secure}`,
+          },
+        });
+      }
+
+      // GET /gmail/callback - Google redirects here after consent.
+      if (path === '/gmail/callback' && request.method === 'GET') {
+        const noLeak = { ...corsHeaders, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' };
+        const oauthError = url.searchParams.get('error');
+        if (oauthError) {
+          return new Response(`Gmail authorisation failed: ${oauthError}`, { status: 400, headers: noLeak });
+        }
+        const code = url.searchParams.get('code');
+        const state = url.searchParams.get('state');
+        const cookieState = parseCookie(request.headers.get('Cookie'), 'gmail_oauth_state');
+        if (!code || !state || !cookieState || state !== cookieState) {
+          return new Response('Invalid or expired authorisation state.', { status: 400, headers: noLeak });
+        }
+        let email: string;
+        try {
+          email = await gmail.exchangeCode(env, request.url, code);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'Gmail token exchange failed';
+          return new Response(message, { status: 502, headers: noLeak });
+        }
+        return new Response(null, {
+          status: 302,
+          headers: {
+            ...noLeak,
+            Location: `${url.origin}/?gmail=${encodeURIComponent(email)}`,
+            'Set-Cookie': 'gmail_oauth_state=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0',
+          },
+        });
+      }
+
+      // GET /gmail/status - linked accounts and their last scan
+      if (path === '/gmail/status' && request.method === 'GET') {
+        return jsonResponse(await gmail.getStatus(env), corsHeaders);
+      }
+
+      // POST /gmail/disconnect { email } - unlink one account
+      if (path === '/gmail/disconnect' && request.method === 'POST') {
+        const body = (await request.json().catch(() => ({}))) as { email?: unknown };
+        const email = typeof body.email === 'string' ? body.email.toLowerCase() : '';
+        if (!email) return jsonResponse({ error: 'email is required' }, corsHeaders, 400);
+        const removed = await gmail.removeAccount(env, email);
+        return jsonResponse({ success: removed }, corsHeaders, removed ? 200 : 404);
+      }
+
+      // POST /gmail/scan[?email=] - scan linked accounts now (the cron does
+      // the same on a schedule)
+      if (path === '/gmail/scan' && request.method === 'POST') {
+        const only = url.searchParams.get('email')?.toLowerCase() || undefined;
+        return jsonResponse(await gmail.scanAll(env, gmailImporter(env, ctx), only), corsHeaders);
       }
 
       // --- Xero integration ---------------------------------------------
