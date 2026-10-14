@@ -2131,7 +2131,7 @@ async function loadXeroStatus() {
     const data = await res.json();
     xeroConnected = Boolean(data.connected);
     if (xeroConnected) {
-      xeroStatusEl.innerHTML = `Connected to <strong>${escapeHtml(data.tenantName || 'Xero')}</strong> · <button type="button" id="xeroDisconnectBtn" class="link-button">disconnect</button>`;
+      xeroStatusEl.innerHTML = `Connected to <strong>${escapeHtml(data.tenantName || 'Xero')}</strong><button type="button" id="xeroDisconnectBtn" class="link-button">disconnect</button>`;
       const dc = document.getElementById('xeroDisconnectBtn');
       if (dc) dc.addEventListener('click', disconnectXero);
       loadXeroMeta();
