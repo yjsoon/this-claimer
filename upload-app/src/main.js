@@ -14,7 +14,7 @@ import {
   navigateToMode,
   renderInvoiceClaimLoadError,
   renderInvoicesFromLoadedData,
-} from './invoices.js?v=20260915-two-line-invoices';
+} from './invoices.js?v=20261014-mobile-rows';
 
 initTheme();
 initPreview();

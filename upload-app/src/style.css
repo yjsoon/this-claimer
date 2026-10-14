@@ -2507,20 +2507,44 @@ body.selecting .claims-view {
 
 /* ---------- Responsive: narrow screens --------------------------------- */
 @media (max-width: 900px) {
-  .app-header-row {
-    grid-template-columns: 1fr auto;
+  .app-header {
+    padding-bottom: 0;
   }
 
+  .app-header-row {
+    grid-template-columns: 1fr auto;
+    gap: 6px 12px;
+  }
+
+  /* On narrow screens the mode switch becomes a row of underlined tabs
+     sitting on the header's bottom edge, so it reads as navigation rather
+     than a twin of the Claims / Receipts toggle further down the page. */
   .app-nav {
     grid-column: 1 / -1;
     grid-row: 2;
     justify-self: stretch;
     display: flex;
+    gap: 4px;
+    padding: 0;
+    background: none;
+    border-radius: 0;
+    margin-bottom: -1px;
   }
 
   .app-nav-link {
     flex: 1;
     min-width: 0;
+    min-height: 40px;
+    padding: 8px 12px;
+    border-radius: 0;
+    border-bottom: 2px solid transparent;
+    font-size: 0.9rem;
+  }
+
+  .app-nav-link.active {
+    background: none;
+    box-shadow: none;
+    border-bottom-color: var(--accent);
   }
 }
 
@@ -2540,11 +2564,7 @@ body.selecting .claims-view {
 
   .app-header {
     margin: 0 calc(-1 * max(12px, env(safe-area-inset-right, 0px))) 12px calc(-1 * max(12px, env(safe-area-inset-left, 0px)));
-    padding: max(8px, env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) 8px max(12px, env(safe-area-inset-left, 0px));
-  }
-
-  .app-header-row {
-    gap: 8px 12px;
+    padding: max(8px, env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) 0 max(12px, env(safe-area-inset-left, 0px));
   }
 
   .backend-picker-label {
@@ -2575,12 +2595,22 @@ body.selecting .claims-view {
 
   .claims-toolbar-actions {
     flex: 1 1 100%;
-    justify-content: space-between;
+    gap: 8px;
   }
 
   .claims-toolbar-actions .btn-compact,
-  .btn-refresh {
+  .claims-toolbar-actions .btn-refresh {
+    flex: 1 1 0;
     min-height: 40px;
+    font-size: 0.86rem;
+    font-weight: 600;
+  }
+
+  /* Refresh matches Find matches on phones instead of floating as a text link */
+  .claims-toolbar-actions .btn-refresh {
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    color: var(--text-2);
   }
 
   .match-review-section {
@@ -2648,42 +2678,77 @@ body.selecting .claims-view {
     padding: 6px 12px;
   }
 
-  /* Rows: info on top, date/amount and actions in a second line */
+  /* Rows: text on the left with date and amount beneath it, buttons on the
+     right spanning both lines, so a row is only as tall as its text. */
   .todo-item,
   .receipt-list li {
-    flex-wrap: wrap;
-    align-items: flex-start;
-    gap: 8px;
-    padding: 12px 10px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "content link"
+      "meta link";
+    align-items: center;
+    gap: 4px 10px;
+    padding: 10px 10px;
+  }
+
+  .receipt-list li {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "content link delete"
+      "meta link delete";
+    column-gap: 6px;
+  }
+
+  .todo-item.show-selector {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "selector content link"
+      "selector meta link";
+  }
+
+  .receipt-list li.show-selector {
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "selector content link delete"
+      "selector meta link delete";
+  }
+
+  .todo-item .select-indicator,
+  .receipt-list li .select-indicator {
+    grid-area: selector;
+    margin-right: 4px;
   }
 
   .todo-content,
   .receipt-info {
-    flex: 1 1 calc(100% - 36px);
+    grid-area: content;
+    flex: none;
   }
 
+  /* The wrapper dissolves so its children can take their own grid cells */
   .todo-actions,
   .receipt-actions {
-    flex: 1 1 100%;
-    margin-left: 0;
-    justify-content: space-between;
-    gap: 10px;
+    display: contents;
   }
 
   .todo-meta,
   .receipt-meta {
+    grid-area: meta;
     flex-direction: row;
     flex-wrap: wrap;
     align-items: center;
-    gap: 6px 10px;
-    flex: 1;
+    gap: 2px 10px;
     min-width: 0;
   }
 
-  /* Indent the second row only when a selector circle sits in the first row */
-  .receipt-list li.show-selector .receipt-actions,
-  .todo-item.show-selector .todo-actions {
-    margin-left: 32px;
+  .todo-item .link-btn,
+  .receipt-list li .link-btn {
+    grid-area: link;
+  }
+
+  .receipt-list li .delete-btn {
+    grid-area: delete;
   }
 
   .link-btn,
@@ -2824,8 +2889,25 @@ body.selecting .claims-view {
 
   .invoices-bar-actions .btn-secondary,
   .invoices-bar-actions .btn-refresh {
-    flex: 1;
+    flex: 1 1 0;
     min-height: 40px;
+    font-size: 0.86rem;
+    font-weight: 600;
+  }
+
+  .invoices-bar-actions .btn-refresh {
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    color: var(--text-2);
+  }
+
+  /* Keep "disconnect" on the same line as the tenant name on phones */
+  .xero-status {
+    row-gap: 4px;
+  }
+
+  .xero-status .link-button {
+    padding-left: 0;
   }
 
   .invoices-intro {
