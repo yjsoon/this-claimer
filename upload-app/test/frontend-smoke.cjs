@@ -778,7 +778,7 @@ async function main() {
   await setupMockApi(desktopPage);
   await desktopPage.goto(`http://127.0.0.1:${port}/invoices`, { waitUntil: 'networkidle' });
   const invoiceContainerWidth = await desktopPage.locator('.container').evaluate((element) => element.getBoundingClientRect().width);
-  assert.equal(invoiceContainerWidth, 1440, 'Invoices should use the wider desktop container');
+  assert.equal(invoiceContainerWidth, 1240, 'Invoices should use the shared desktop container width');
   const desktopRow = desktopPage.locator('.invoice-section[data-bucket="nongst"] tr[data-id]');
   const rowLayout = () => desktopRow.evaluate((row) => ({
     height: row.getBoundingClientRect().height,
@@ -796,7 +796,7 @@ async function main() {
   await desktopPage.keyboard.press('Escape');
   await desktopPage.locator('#navClaims').click();
   const claimsContainerWidth = await desktopPage.locator('.container').evaluate((element) => element.getBoundingClientRect().width);
-  assert.equal(claimsContainerWidth, 1100, 'Claims should retain its existing desktop width');
+  assert.equal(claimsContainerWidth, 1240, 'Claims should share the same desktop width as Invoices so the layout does not jump between tabs');
 
   const shortPage = await browser.newPage({ viewport: { width: 568, height: 390 } });
   await shortPage.addInitScript(() => {
