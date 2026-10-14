@@ -613,7 +613,7 @@ function defaultDraftReference(bucket, lines = []) {
 }
 
 function invoiceSectionStatusHtml() {
-  return 'Payee: <strong>Soon Yin Jie</strong> · tax-inclusive. HowMuch/YNAB stay TODO until you mark lines claimed.';
+  return 'Payee <strong>Soon Yin Jie</strong> · amounts are tax-inclusive SGD';
 }
 
 function hasLeftoverDraftStamp(line) {
@@ -2196,7 +2196,7 @@ function updateModeNav(activeInvoices) {
 }
 
 function updateAppTitle(invoices) {
-  document.title = invoices ? 'Invoices — Receipt Upload' : 'Claims — Receipt Upload';
+  document.title = invoices ? 'Invoices · Claimer' : 'Claims · Claimer';
 }
 
 export function navigateToMode(invoices, { replace = false, refresh = true } = {}) {
