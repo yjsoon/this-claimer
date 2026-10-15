@@ -7,6 +7,8 @@ import {
   RECEIPT_DATE_RE,
   CLAIM_FILTER_KEY,
   DEFAULT_CLAIM_FILTERS,
+  REJECTED_MATCHES_KEY,
+  MATCH_REVIEW_COLLAPSED_KEY,
 } from './lib/constants.js';
 import {
   authHeaders,
@@ -20,6 +22,7 @@ import {
 import {
   receiptsData,
   claimsData,
+  claimsDataBackend,
   claimsLoadErrorMessage,
   setReceiptsData,
   setClaimsData,
@@ -37,16 +40,29 @@ import {
   formatReceiptDateLabel,
   getComparableReceiptAmounts,
   scoreReceiptClaimMatch,
+  buildMatchSuggestions,
+  describeMatchReason,
+  makeSuggestionPairId,
 } from './lib/match.js';
-import { openPreview } from './lib/preview.js';
+import { openPreview } from './lib/preview.js?v=20260914-preview-review';
+import { getAiStatus, isClaudeConfigured, loadAiSettings } from './ai.js?v=20261015-ai';
 
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
 const receiptList = document.getElementById('receiptList');
 const countSpan = document.getElementById('count');
 const refreshBtn = document.getElementById('refreshBtn');
+const findMatchesBtn = document.getElementById('findMatchesBtn');
+const matchReviewSection = document.getElementById('matchReviewSection');
+const matchReviewList = document.getElementById('matchReviewList');
+const matchReviewCount = document.getElementById('matchReviewCount');
+const matchReviewToggle = document.getElementById('matchReviewToggle');
+const matchReviewBody = document.getElementById('matchReviewBody');
+const acceptAllClearBtn = document.getElementById('acceptAllClearBtn');
+const clearDismissedMatchesBtn = document.getElementById('clearDismissedMatchesBtn');
 const todoList = document.getElementById('todoList');
 const todoCount = document.getElementById('todoCount');
+const claimsBackendSelect = document.getElementById('claimsBackend');
 const claimFilterInput = document.getElementById('claimFilterInput');
 const claimFilterPills = document.getElementById('claimFilterPills');
 const claimFilterClear = document.getElementById('claimFilterClear');
@@ -55,7 +71,6 @@ const claimFilterClear = document.getElementById('claimFilterClear');
 const linkingDock = document.getElementById('linkingDock');
 const linkingContextText = document.getElementById('linkingContextText');
 const linkingContextPreview = document.getElementById('linkingContextPreview');
-const linkingContextChange = document.getElementById('linkingContextChange');
 const actionBar = document.getElementById('actionBar');
 const actionText = document.getElementById('actionText');
 const confirmSelection = document.getElementById('confirmSelection');
@@ -78,11 +93,95 @@ let selectedClaimIds = new Set();
 let linkingSource = null; // 'receipt' | 'claim'
 let amountTaggingInFlight = false;
 let lastAmountTagAttempt = 0;
+let claimsRequestId = 0;
+// Starts true: claims always load after receipts, so the upload zone must not
+// judge "nothing outstanding" against an empty claims list before that.
+let claimsLoadInFlight = true;
+let matchReviewCollapsed = loadMatchReviewCollapsed();
+const CLAIMS_BACKEND_KEY = 'claim_manager_backend';
+
+export function getClaimsBackend() {
+  return claimsBackendSelect?.value === 'ynab' ? 'ynab' : 'howmuch';
+}
+
+if (claimsBackendSelect) {
+  claimsBackendSelect.value = localStorage.getItem(CLAIMS_BACKEND_KEY) === 'ynab' ? 'ynab' : 'howmuch';
+  claimsBackendSelect.addEventListener('change', async () => {
+    const backend = getClaimsBackend();
+    localStorage.setItem(CLAIMS_BACKEND_KEY, backend);
+    claimsLoadInFlight = true;
+    setClaimsLoadErrorMessage('');
+    setClaimsData([]);
+    clearSelection();
+    matchSuggestions = [];
+    claudeMatches = [];
+    renderMatchReview();
+    renderOutstandingClaims();
+    renderLinkedPairs();
+    updateUploadZoneCompact();
+    window.dispatchEvent(new CustomEvent('claims-backend-change', { detail: { backend, loaded: false } }));
+    await loadYnabTodos();
+    if (backend === getClaimsBackend() && claimsDataBackend === backend) {
+      window.dispatchEvent(new CustomEvent('claims-backend-change', { detail: { backend, loaded: true } }));
+    }
+  });
+}
+let matchSuggestions = [];
+// Pairs Claude suggested ({ claimId, receiptKey, confidence, reason }); kept
+// across rebuilds until linked, dismissed, or the backend changes.
+let claudeMatches = [];
+let claudeMatchInFlight = false;
+let matchSuggestionRefreshTimer = null;
+let matchAcceptInFlight = false;
+let rejectedMatchPairs = loadRejectedMatchPairs();
+let receiptsLoadSucceeded = false;
 
 let claimFilterState = {
   text: '',
   quickFilters: [],
 };
+
+function loadRejectedMatchPairs() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(REJECTED_MATCHES_KEY) || '[]');
+    return new Set(Array.isArray(stored) ? stored.filter((id) => typeof id === 'string' && id.includes('::')) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveRejectedMatchPairs() {
+  try {
+    localStorage.setItem(REJECTED_MATCHES_KEY, JSON.stringify(Array.from(rejectedMatchPairs)));
+  } catch (error) {
+    console.warn('Rejected match preferences could not be saved:', error);
+  }
+}
+
+function loadMatchReviewCollapsed() {
+  try {
+    return localStorage.getItem(MATCH_REVIEW_COLLAPSED_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function setMatchReviewCollapsed(collapsed) {
+  matchReviewCollapsed = Boolean(collapsed);
+  try {
+    localStorage.setItem(MATCH_REVIEW_COLLAPSED_KEY, String(matchReviewCollapsed));
+  } catch (error) {
+    console.warn('Match review preference could not be saved:', error);
+  }
+  applyMatchReviewCollapsed();
+}
+
+function applyMatchReviewCollapsed() {
+  if (!matchReviewSection || !matchReviewBody || !matchReviewToggle) return;
+  matchReviewSection.classList.toggle('is-collapsed', matchReviewCollapsed);
+  matchReviewBody.hidden = matchReviewCollapsed;
+  matchReviewToggle.setAttribute('aria-expanded', matchReviewCollapsed ? 'false' : 'true');
+}
 
 
 // Validate file before upload
@@ -199,9 +298,17 @@ async function fetchAllReceipts() {
 
 // Load receipt list
 export async function loadReceipts() {
+  receiptsLoadSucceeded = false;
+  // First load: show that something is happening rather than an empty column.
+  if (receiptsData.length === 0 && !receiptList.querySelector('li')) {
+    receiptList.innerHTML = '<li class="loading-state"><span class="spinner"></span> Loading...</li>';
+  }
   try {
     const receipts = await fetchAllReceipts();
-    if (!receipts) return;
+    if (!receipts) {
+      scheduleMatchSuggestionRefresh();
+      return;
+    }
 
     // Sort: unlinked first, then linked.
     // Unlinked receipts use effective receipt date (manual/AI/upload fallback) descending.
@@ -220,6 +327,7 @@ export async function loadReceipts() {
 
       return new Date(b.uploaded).getTime() - new Date(a.uploaded).getTime();
     }));
+    receiptsLoadSucceeded = true;
 
     const outstandingReceipts = receiptsData.filter((receipt) => getLinkedClaimIds(receipt).length === 0);
     countSpan.textContent = `(${outstandingReceipts.length})`;
@@ -227,10 +335,12 @@ export async function loadReceipts() {
 
     if (outstandingReceipts.length === 0) {
       receiptList.innerHTML = '<li class="empty-state">No outstanding receipts</li>';
+      if (!claimsLoadInFlight && !claimsLoadErrorMessage) renderOutstandingClaims();
       applyLinkingHighlights();
       renderLinkedPairs();
       updateUploadZoneCompact();
       triggerPendingAmountTagging();
+      scheduleMatchSuggestionRefresh();
       return;
     }
 
@@ -267,12 +377,32 @@ export async function loadReceipts() {
         const usdUnderName = r.taggedCurrency === 'USD' && taggedAmount !== null
           ? `<span class="receipt-usd-tag">${escapeHtml(formatCurrencyAmount('USD', taggedAmount))}</span>`
           : '';
+        // Lead with what the receipt is for; the filename stays visible beneath
+        // so a specific PDF can still be found.
+        const primaryTitle = titleLabel || name;
         const titleUnderName = titleLabel
-          ? `<span class="receipt-title-tag">${escapeHtml(titleLabel)}</span>`
+          ? `<span class="receipt-title-tag">${escapeHtml(name)}</span>`
           : '';
-        const linkBtnIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        // Gmail imports link back to their email; the chip sits beside the
+        // filename so these rows stay the same height as manual uploads.
+        const gmailLink = r.source === 'gmail' && r.gmailAccount && r.gmailMessageId
+          ? `https://mail.google.com/mail/?authuser=${encodeURIComponent(r.gmailAccount)}#all/${encodeURIComponent(r.gmailMessageId)}`
+          : '';
+        const gmailTag = r.source !== 'gmail'
+          ? ''
+          : gmailLink
+            ? `<a class="receipt-source-tag" target="_blank" rel="noopener" href="${gmailLink}" title="${escapeHtml(`${r.gmailAccount}${r.gmailSubject ? `: ${r.gmailSubject}` : ''}`)}" aria-label="Open the original email in Gmail (${escapeHtml(r.gmailAccount)}), opens in a new tab">Gmail<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M9 7h8v8"/></svg></a>`
+            : '<span class="receipt-source-tag">Gmail</span>';
+        const subLine = titleUnderName || gmailTag
+          ? `<span class="receipt-sub">${titleUnderName}${gmailTag}</span>`
+          : '';
+        const linkBtnIcon = `<svg class="icon-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
               <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+            </svg>
+            <svg class="icon-preview" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/>
+              <circle cx="12" cy="12" r="3"/>
             </svg>`;
         const deleteBtnIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="3 6 5 6 21 6"/>
@@ -288,8 +418,8 @@ export async function loadReceipts() {
               <span class="checkmark">✓</span>
             </span>
             <div class="receipt-info">
-              <span class="receipt-name">${escapeHtml(name)}</span>
-              ${titleUnderName}
+              <span class="receipt-name">${escapeHtml(primaryTitle)}</span>
+              ${subLine}
               ${usdUnderName}
             </div>
             <div class="receipt-actions">
@@ -297,7 +427,7 @@ export async function loadReceipts() {
                 <span class="receipt-date ${dateDisplay.className}" title="${escapeHtml(dateDisplay.title)}">${dateDisplay.text}</span>
                 ${primaryAmountBadge}
               </div>
-              <button class="link-btn" title="Link to claim">
+              <button class="link-btn" title="Link to claim" aria-label="Link to claim">
                 ${linkBtnIcon}
               </button>
               <button class="delete-btn" title="Delete receipt">
@@ -315,15 +445,22 @@ export async function loadReceipts() {
       li.querySelector('.receipt-date').addEventListener('click', (e) => handleDateOverrideClick(e, li));
       li.querySelector('.link-btn').addEventListener('click', (e) => handleLinkBtnClick(e, li));
       li.querySelector('.delete-btn').addEventListener('click', (e) => handleDeleteBtnClick(e, li));
+      li.querySelector('.receipt-source-tag')?.addEventListener('click', (e) => e.stopPropagation());
     });
 
+    // Which claims are outstanding depends on receipt links, so re-render that
+    // list whenever receipts change and claims are already loaded (covers a
+    // parallel load where receipts finish last, and receipt-only refreshes).
+    if (!claimsLoadInFlight && !claimsLoadErrorMessage) renderOutstandingClaims();
     applyLinkingHighlights();
     renderLinkedPairs();
     updateUploadZoneCompact();
     triggerPendingAmountTagging();
+    scheduleMatchSuggestionRefresh();
   } catch (err) {
     console.error('Failed to load receipts:', err);
     receiptList.innerHTML = '<li class="empty-state">Failed to load receipts</li>';
+    scheduleMatchSuggestionRefresh();
   }
 }
 
@@ -472,6 +609,8 @@ function resetClaimsAfterLoadFailure(message) {
   setClaimsLoadErrorMessage(message || 'Failed to load claims');
   setClaimsData([]);
   clearSelection();
+  matchSuggestions = [];
+  renderMatchReview();
   renderClaimLoadError(claimsLoadErrorMessage);
   linkedCount.textContent = '(error)';
   linkedList.innerHTML = '<li class="empty-state">Claims unavailable</li>';
@@ -511,6 +650,7 @@ function renderLinkedPairs() {
 
   receiptsData.forEach((receipt) => {
     getActiveReadyClaimIds(receipt).forEach((claimId, index) => {
+      if (!isReadyOnlyClaimId(claimId) && receiptClaimsBackend(receipt) !== claimsDataBackend) return;
       linkedPairs.push({
         receipt,
         claimId,
@@ -548,7 +688,7 @@ function renderLinkedPairs() {
       const claimSub = claim
         ? (claim.payee || (claim.accountName || 'Unknown account'))
         : isReadyOnly
-          ? 'No YNAB claim linked'
+          ? 'No claim linked'
           : 'Claim details unavailable';
       const claimDate = claim
         ? formatDateForLocale(parseDateOnly(claim.date) || new Date(claim.date))
@@ -581,8 +721,8 @@ function renderLinkedPairs() {
               data-receipt-key="${escapeHtml(receipt.key)}"
               data-receipt-name="${escapeHtml(receiptName)}"
               title="Preview receipt">
-            <span class="linked-pair-title">${escapeHtml(receiptName)}</span>
-            <span class="linked-pair-sub">${escapeHtml(receiptTitle || 'Receipt')}</span>
+            <span class="linked-pair-title">${escapeHtml(receiptTitle || receiptName)}</span>
+            <span class="linked-pair-sub">${escapeHtml(receiptTitle ? receiptName : 'Receipt')}</span>
             <span class="linked-pair-meta">${escapeHtml(receiptDateInfo.text)} · ${escapeHtml(receiptAmount)}</span>
           </button>
           <button type="button" class="linked-pair-unlink"
@@ -611,19 +751,31 @@ function renderLinkedPairs() {
       if (!receiptKey || !claimId) return;
 
       const receipt = receiptsData.find((item) => item.key === receiptKey);
+      const backend = receipt ? receiptClaimsBackend(receipt) : getClaimsBackend();
       const linkedCountForReceipt = receipt ? getLinkedClaimIds(receipt).length : 1;
       const confirmation = linkedCountForReceipt > 1
         ? `This receipt is linked to ${linkedCountForReceipt} claims. Unlink only this pair?`
         : 'Unlink this claim-receipt pair?';
 
       if (!window.confirm(confirmation)) return;
-      await unlinkClaimFromReceipt(receiptKey, claimId);
+      await unlinkClaimFromReceipt(receiptKey, claimId, backend);
     });
   });
 }
 
 function getActiveReadyClaimIds(receipt) {
   return receipt.xeroInvoiceId ? [] : getLinkedClaimIds(receipt);
+}
+
+// Linking, unlinking, deleting or re-dating a receipt only changes receipt
+// metadata, so re-render the claim-side views from the claims already loaded
+// instead of fetching them from the backend again.
+function refreshClaimViews() {
+  if (claimsLoadErrorMessage) return;
+  renderOutstandingClaims();
+  renderLinkedPairs();
+  updateUploadZoneCompact();
+  scheduleMatchSuggestionRefresh();
 }
 
 
@@ -665,12 +817,470 @@ function formatClaimAmount(amount) {
 
 function updateUploadZoneCompact() {
   if (!dropzone) return;
+  // Stay compact until both lists have settled, so the zone doesn't flash
+  // big → small while data is still loading.
+  if (claimsLoadInFlight || !receiptsLoadSucceeded) return;
   const outstandingClaims = claimsLoadErrorMessage ? 0 : getOutstandingClaims().length;
   const outstandingReceipts = receiptsData.filter((receipt) => getLinkedClaimIds(receipt).length === 0).length;
-  const compact = outstandingClaims > 0 || outstandingReceipts > 0;
+  const readyPairs = countReadyToClaimPairs();
+  const compact = outstandingClaims > 0 || outstandingReceipts > 0 || readyPairs > 0;
   dropzone.classList.toggle('is-compact', compact);
-  const compactLabel = dropzone.querySelector('.dropzone-compact-label');
-  if (compactLabel) compactLabel.hidden = !compact;
+}
+
+function scheduleMatchSuggestionRefresh() {
+  if (matchSuggestionRefreshTimer) {
+    clearTimeout(matchSuggestionRefreshTimer);
+  }
+  matchSuggestionRefreshTimer = setTimeout(() => {
+    matchSuggestionRefreshTimer = null;
+    refreshMatchSuggestions({ announce: false });
+  }, 150);
+}
+
+function pruneRejectedMatchPairs() {
+  const validClaimIds = new Set(claimsData.map((claim) => claim.id));
+  const unlinkedReceiptKeys = new Set(
+    receiptsData
+      .filter((receipt) => getLinkedClaimIds(receipt).length === 0)
+      .map((receipt) => receipt.key)
+  );
+  let changed = false;
+  for (const pairId of Array.from(rejectedMatchPairs)) {
+    const separator = pairId.indexOf('::');
+    if (separator <= 0) {
+      rejectedMatchPairs.delete(pairId);
+      changed = true;
+      continue;
+    }
+    const claimId = pairId.slice(0, separator);
+    const receiptKey = pairId.slice(separator + 2);
+    if (!validClaimIds.has(claimId) || !unlinkedReceiptKeys.has(receiptKey)) {
+      rejectedMatchPairs.delete(pairId);
+      changed = true;
+    }
+  }
+  if (changed) saveRejectedMatchPairs();
+}
+
+function dropSuggestionsCollidingWith(claimId, receiptKey) {
+  matchSuggestions = matchSuggestions.filter((item) => {
+    if (item.claim.id === claimId) return false;
+    if (item.receipt.key === receiptKey) return false;
+    return !item.alternatives.some((alt) => alt.receipt.key === receiptKey);
+  });
+}
+
+function refreshMatchSuggestions({ announce = false } = {}) {
+  if (!matchReviewSection || !matchReviewList) return;
+
+  if (!receiptsLoadSucceeded) {
+    matchSuggestions = [];
+    renderMatchReview();
+    return;
+  }
+
+  if (claimsLoadErrorMessage || claimsData.length === 0) {
+    matchSuggestions = [];
+    renderMatchReview();
+    if (announce) {
+      showStatus('error', claimsLoadErrorMessage || 'No claims loaded yet');
+    }
+    return;
+  }
+
+  pruneRejectedMatchPairs();
+
+  const filterTerms = getClaimFilterTerms();
+  matchSuggestions = buildMatchSuggestions(claimsData, receiptsData, {
+    nearDays: 0,
+    allowUploadDate: false,
+    rejectedPairs: rejectedMatchPairs,
+  })
+    .filter((suggestion) => !claimMatchesHideFilter(suggestion.claim, filterTerms));
+  mergeClaudeSuggestions(filterTerms);
+  renderMatchReview();
+
+  if (!announce) return;
+
+  const clearCount = matchSuggestions.filter((item) => item.kind === 'clear').length;
+  const ambiguousCount = matchSuggestions.length - clearCount;
+  if (matchSuggestions.length === 0) {
+    showStatus('success', rejectedMatchPairs.size > 0
+      ? 'No matches to review (some were dismissed)'
+      : 'No matches found');
+    return;
+  }
+  showStatus(
+    'success',
+    `Found ${matchSuggestions.length} suggestion${matchSuggestions.length === 1 ? '' : 's'}` +
+      ` (${clearCount} clear, ${ambiguousCount} ambiguous)`
+  );
+}
+
+// Claude's picks sit after the rule-based ones. A clear rule match always
+// wins; for a claim the rules found ambiguous, Claude's pick replaces the guess.
+function mergeClaudeSuggestions(filterTerms) {
+  if (claudeMatches.length === 0) return;
+  const outstanding = new Map(getOutstandingClaims().map((claim) => [claim.id, claim]));
+  const unlinked = new Map(
+    receiptsData.filter((receipt) => getLinkedClaimIds(receipt).length === 0).map((receipt) => [receipt.key, receipt])
+  );
+  const clear = matchSuggestions.filter((item) => item.kind === 'clear');
+  const clearClaimIds = new Set(clear.map((item) => item.claim.id));
+  const clearReceiptKeys = new Set(clear.map((item) => item.receipt.key));
+
+  const additions = [];
+  const pairedClaims = new Set();
+  const pairedReceipts = new Set();
+  claudeMatches = claudeMatches.filter((match) => {
+    const claim = outstanding.get(match.claimId);
+    const receipt = unlinked.get(match.receiptKey);
+    if (!claim || !receipt) return false;
+    const id = makeSuggestionPairId(claim.id, receipt.key);
+    if (rejectedMatchPairs.has(id)) return false;
+    if (pairedClaims.has(claim.id) || pairedReceipts.has(receipt.key)) return false;
+    pairedClaims.add(claim.id);
+    pairedReceipts.add(receipt.key);
+    if (clearClaimIds.has(claim.id) || clearReceiptKeys.has(receipt.key)) return true;
+    if (claimMatchesHideFilter(claim, filterTerms)) return true;
+    additions.push({
+      id,
+      kind: 'claude',
+      claim,
+      receipt,
+      reason: match.reason,
+      confidence: match.confidence,
+      alternatives: [],
+    });
+    return true;
+  });
+  if (additions.length === 0) return;
+
+  const claudeClaimIds = new Set(additions.map((item) => item.claim.id));
+  const claudeReceiptKeys = new Set(additions.map((item) => item.receipt.key));
+  matchSuggestions = matchSuggestions
+    .filter((item) => item.kind === 'clear' || (!claudeClaimIds.has(item.claim.id) && !claudeReceiptKeys.has(item.receipt.key)))
+    .concat(additions);
+}
+
+function claudeMatchPayload() {
+  const clear = matchSuggestions.filter((item) => item.kind === 'clear');
+  const clearClaimIds = new Set(clear.map((item) => item.claim.id));
+  const clearReceiptKeys = new Set(clear.map((item) => item.receipt.key));
+  const byDateDesc = (a, b) => String(b.date || '').localeCompare(String(a.date || ''));
+
+  const claims = getOutstandingClaims()
+    .filter((claim) => !clearClaimIds.has(claim.id) && !claimMatchesHideFilter(claim, getClaimFilterTerms()))
+    .map((claim) => ({
+      id: claim.id,
+      date: claim.date,
+      amount: Number(claim.amount),
+      payee: claim.payee,
+      description: claim.description,
+    }))
+    .filter((claim) => Number.isFinite(claim.amount))
+    .sort(byDateDesc)
+    .slice(0, 150);
+
+  const receipts = receiptsData
+    .filter((receipt) => getLinkedClaimIds(receipt).length === 0 && !clearReceiptKeys.has(receipt.key))
+    .map((receipt) => {
+      const { date } = getReceiptMatchDate(receipt);
+      const amount = Number(receipt.taggedAmount);
+      const sgd = Number(receipt.taggedAmountSgdApprox);
+      return {
+        key: receipt.key,
+        filename: getReceiptDisplayName(receipt),
+        uploaded: receipt.uploaded,
+        receiptDate: receipt.receiptDate || receipt.detectedReceiptDate || undefined,
+        amount: Number.isFinite(amount) ? amount : undefined,
+        currency: receipt.taggedCurrency || undefined,
+        amountSgdApprox: Number.isFinite(sgd) ? sgd : undefined,
+        vendor: receipt.taggedVendor || undefined,
+        purpose: receipt.taggedPurpose || undefined,
+        date: date ? date.toISOString().slice(0, 10) : '',
+      };
+    })
+    .sort(byDateDesc)
+    .slice(0, 250)
+    .map(({ date, ...receipt }) => receipt);
+
+  return { claims, receipts };
+}
+
+function setFindMatchesBusy(busy, label = 'Asking Claude…') {
+  if (!findMatchesBtn) return;
+  findMatchesBtn.disabled = busy;
+  findMatchesBtn.textContent = busy ? label : 'Find matches';
+}
+
+function ruleMatchSummary() {
+  const clearCount = matchSuggestions.filter((item) => item.kind === 'clear').length;
+  const ambiguousCount = matchSuggestions.filter((item) => item.kind === 'ambiguous').length;
+  return clearCount || ambiguousCount ? `${clearCount} clear, ${ambiguousCount} ambiguous` : '';
+}
+
+// Find matches runs the exact rules; with a Claude key set it then asks
+// Claude about whatever the rules left unpaired.
+async function findMatches() {
+  if (claudeMatchInFlight) return;
+  // AI settings may still be loading (or have failed) right after sign-in;
+  // check before deciding Claude isn't set up.
+  if (!getAiStatus()) {
+    claudeMatchInFlight = true;
+    setFindMatchesBusy(true, 'Finding matches…');
+    try {
+      await loadAiSettings();
+    } finally {
+      claudeMatchInFlight = false;
+      setFindMatchesBusy(false);
+    }
+    if (!getAiStatus()) {
+      refreshMatchSuggestions({ announce: false });
+      showStatus('error', "Couldn't check the AI settings, so only exact matches are shown. Try again.");
+      return;
+    }
+  }
+  if (!isClaudeConfigured()) {
+    refreshMatchSuggestions({ announce: true });
+    return;
+  }
+  if (!receiptsLoadSucceeded || claimsLoadErrorMessage || claimsData.length === 0) {
+    refreshMatchSuggestions({ announce: true });
+    return;
+  }
+  refreshMatchSuggestions({ announce: false });
+  const payload = claudeMatchPayload();
+  if (payload.claims.length === 0 || payload.receipts.length === 0) {
+    refreshMatchSuggestions({ announce: true });
+    return;
+  }
+
+  claudeMatchInFlight = true;
+  setFindMatchesBusy(true);
+  showStatus('uploading', `Asking Claude about ${payload.claims.length} unmatched claim${payload.claims.length === 1 ? '' : 's'}…`);
+  try {
+    const res = await fetch(`${API_BASE}/ai/match`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    // Pairs the user already dismissed are dropped before they can displace anything.
+    const matches = (Array.isArray(data.matches) ? data.matches : [])
+      .filter((m) => !rejectedMatchPairs.has(makeSuggestionPairId(m.claimId, m.receiptKey)));
+    // Older picks give way to this run's on either side, so each claim and
+    // each receipt still appears in at most one Claude pair.
+    const freshClaims = new Set(matches.map((m) => m.claimId));
+    const freshReceipts = new Set(matches.map((m) => m.receiptKey));
+    claudeMatches = claudeMatches
+      .filter((m) => !freshClaims.has(m.claimId) && !freshReceipts.has(m.receiptKey))
+      .concat(matches);
+    setMatchReviewCollapsed(false);
+    refreshMatchSuggestions({ announce: false });
+    const fromClaude = matchSuggestions.filter((item) => item.kind === 'claude').length;
+    const parts = [ruleMatchSummary(), fromClaude ? `${fromClaude} from Claude` : ''].filter(Boolean);
+    showStatus('success', parts.length
+      ? `Found ${matchSuggestions.length} suggestion${matchSuggestions.length === 1 ? '' : 's'} (${parts.join(', ')})`
+      : 'No matches found');
+  } catch (err) {
+    refreshMatchSuggestions({ announce: false });
+    const reason = err instanceof Error && !/^HTTP /.test(err.message) ? err.message : "Claude couldn't be reached.";
+    showStatus('error', `${reason} Showing exact matches only.`);
+  } finally {
+    claudeMatchInFlight = false;
+    setFindMatchesBusy(false);
+  }
+}
+
+function renderMatchReview() {
+  if (!matchReviewSection || !matchReviewList || !matchReviewCount) return;
+
+  applyMatchReviewCollapsed();
+  const clearCount = matchSuggestions.filter((item) => item.kind === 'clear').length;
+  matchReviewCount.textContent = `(${matchSuggestions.length})`;
+  if (acceptAllClearBtn) {
+    acceptAllClearBtn.hidden = clearCount === 0;
+    acceptAllClearBtn.textContent = clearCount > 0 ? `Accept all clear (${clearCount})` : 'Accept all clear';
+    acceptAllClearBtn.disabled = matchAcceptInFlight || clearCount === 0;
+  }
+  if (clearDismissedMatchesBtn) {
+    clearDismissedMatchesBtn.hidden = rejectedMatchPairs.size === 0;
+  }
+
+  const showSection = matchSuggestions.length > 0 || rejectedMatchPairs.size > 0;
+  matchReviewSection.hidden = !showSection;
+
+  if (matchSuggestions.length === 0) {
+    matchReviewList.innerHTML = rejectedMatchPairs.size > 0
+      ? '<li class="empty-state">No suggestions right now. Clear dismissed to restore skipped matches.</li>'
+      : '';
+    return;
+  }
+  matchReviewList.innerHTML = matchSuggestions.map((suggestion) => {
+    const claimDate = formatDateForLocale(parseDateOnly(suggestion.claim.date) || new Date(suggestion.claim.date));
+    const claimLabel = (suggestion.claim.description || suggestion.claim.payee || 'Claim').trim();
+    const receiptName = getReceiptDisplayName(suggestion.receipt);
+    const isClaude = suggestion.kind === 'claude';
+    const reason = isClaude ? suggestion.reason || 'Suggested by Claude' : describeMatchReason(suggestion);
+    const altCount = suggestion.alternatives.length;
+    const chipClass = isClaude ? 'claude' : (suggestion.kind === 'clear' ? 'clear' : 'ambiguous');
+    const chipLabel = isClaude
+      ? 'Claude'
+      : suggestion.kind === 'clear'
+        ? 'Clear'
+        : (altCount > 0 ? `Best of ${altCount + 1}` : 'Ambiguous');
+    const altNote = altCount > 0
+      ? `<p class="match-review-alt">${altCount} other receipt${altCount === 1 ? ' also matches' : 's also match'} — use Change to pick</p>`
+      : (suggestion.kind === 'ambiguous'
+        ? '<p class="match-review-alt">Also matches other claims — confirm carefully</p>'
+        : '');
+
+    return `
+      <li class="match-review-item is-${escapeHtml(suggestion.kind)}" data-suggestion-id="${escapeHtml(suggestion.id)}">
+        <div class="match-review-claim">
+          <span>${escapeHtml(claimLabel)}</span>
+          <span>${escapeHtml(claimDate)}</span>
+          <span>${escapeHtml(formatClaimAmount(suggestion.claim.amount))}</span>
+        </div>
+        <span class="match-review-arrow" aria-hidden="true">suggested receipt</span>
+        <div class="match-review-receipt">
+          <span>${escapeHtml(receiptName)}</span>
+        </div>
+        <div class="match-review-meta">
+          <span class="match-review-chip ${chipClass}">${chipLabel}</span>
+          <span class="match-review-reason">${escapeHtml(reason)}</span>
+        </div>
+        ${altNote}
+        <div class="match-review-row-actions">
+          <button type="button" class="btn-secondary btn-compact match-preview-btn" aria-label="Preview receipt for ${escapeHtml(claimLabel)}">Preview</button>
+          <button type="button" class="btn-primary btn-compact match-accept-btn" aria-label="Accept match for ${escapeHtml(claimLabel)}" ${matchAcceptInFlight ? 'disabled' : ''}>Accept</button>
+          <button type="button" class="btn-danger-quiet btn-compact match-reject-btn" aria-label="Reject match for ${escapeHtml(claimLabel)}" ${matchAcceptInFlight ? 'disabled' : ''}>Reject</button>
+          <button type="button" class="btn-secondary btn-compact match-change-btn" aria-label="Change receipt for ${escapeHtml(claimLabel)}" ${matchAcceptInFlight ? 'disabled' : ''}>Change…</button>
+        </div>
+      </li>
+    `;
+  }).join('');
+
+  matchReviewList.querySelectorAll('.match-review-item').forEach((li) => {
+    const suggestionId = li.dataset.suggestionId;
+    const suggestion = matchSuggestions.find((item) => item.id === suggestionId);
+    if (!suggestion) return;
+
+    li.querySelector('.match-preview-btn')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openPreview(suggestion.receipt.key, getReceiptDisplayName(suggestion.receipt));
+    });
+    li.querySelector('.match-accept-btn')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      acceptMatchSuggestion(suggestion);
+    });
+    li.querySelector('.match-reject-btn')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      rejectMatchSuggestion(suggestion);
+    });
+    li.querySelector('.match-change-btn')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      changeMatchSuggestion(suggestion);
+    });
+  });
+}
+
+async function acceptMatchSuggestion(suggestion) {
+  if (!suggestion || matchAcceptInFlight) return;
+  matchAcceptInFlight = true;
+  renderMatchReview();
+  showStatus('uploading', 'Linking match...');
+
+  try {
+    const result = await patchReceiptLink(suggestion.receipt.key, suggestion.claim);
+    if (!result.ok) {
+      showStatus('error', result.error || 'Failed to link match');
+      return;
+    }
+
+    clearSelection();
+    dropSuggestionsCollidingWith(suggestion.claim.id, suggestion.receipt.key);
+    renderMatchReview();
+    showStatus('success', 'Match linked');
+    await loadReceipts();
+    refreshClaimViews();
+    refreshMatchSuggestions({ announce: false });
+  } finally {
+    matchAcceptInFlight = false;
+    renderMatchReview();
+  }
+}
+
+function rejectMatchSuggestion(suggestion) {
+  if (!suggestion || matchAcceptInFlight) return;
+  // Dismiss only this pair so the next-ranked receipt can surface on rebuild.
+  rejectedMatchPairs.add(suggestion.id);
+  saveRejectedMatchPairs();
+  refreshMatchSuggestions({ announce: false });
+  showStatus('success', 'Suggestion dismissed');
+}
+
+function changeMatchSuggestion(suggestion) {
+  if (!suggestion || matchAcceptInFlight) return;
+  const candidateKeys = [
+    suggestion.receipt.key,
+    ...suggestion.alternatives.map((alt) => alt.receipt.key),
+  ];
+  startClaimLinkFlow(suggestion.claim.id);
+  selectedReceiptKeys = new Set([suggestion.receipt.key]);
+  applyLinkingHighlights();
+
+  // Candidates share a date, and the list is date-sorted, so they already sit
+  // together; scroll the suggested one into view rather than reordering the list.
+  if (receiptList && candidateKeys.length > 0) {
+    const target = receiptList.querySelector(`li[data-key="${CSS.escape(suggestion.receipt.key)}"]`);
+    if (target && window.innerWidth > 700) {
+      target.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  if (window.innerWidth <= 700) {
+    switchTab('receipts');
+    scrollTabToggleIntoView();
+  }
+}
+
+async function acceptAllClearSuggestions() {
+  const clearSuggestions = matchSuggestions.filter((item) => item.kind === 'clear');
+  if (clearSuggestions.length === 0 || matchAcceptInFlight) return;
+
+  const confirmed = window.confirm(
+    `Link ${clearSuggestions.length} clear match${clearSuggestions.length === 1 ? '' : 'es'} now?`
+  );
+  if (!confirmed) return;
+
+  matchAcceptInFlight = true;
+  renderMatchReview();
+  showStatus('uploading', `Linking ${clearSuggestions.length} clear match${clearSuggestions.length === 1 ? '' : 'es'}...`);
+
+  try {
+    const results = await Promise.all(
+      clearSuggestions.map((suggestion) => patchReceiptLink(suggestion.receipt.key, suggestion.claim))
+    );
+    const successCount = results.filter((result) => result.ok).length;
+    const failCount = results.length - successCount;
+
+    clearSelection();
+    if (failCount === 0) {
+      showStatus('success', `Linked ${successCount} clear match${successCount === 1 ? '' : 'es'}`);
+    } else {
+      showStatus('error', `Linked ${successCount}, failed ${failCount}`);
+    }
+
+    await loadReceipts();
+    refreshClaimViews();
+    refreshMatchSuggestions({ announce: false });
+  } finally {
+    matchAcceptInFlight = false;
+    renderMatchReview();
+  }
 }
 
 function updateLinkingContext() {
@@ -691,7 +1301,7 @@ function updateLinkingContext() {
     const amount = getReceiptAmountLabel(receipt);
     const dateInfo = getReceiptMatchDate(receipt);
     const dateStr = dateInfo.date ? formatDateForLocale(dateInfo.date) : '';
-    linkingContextText.textContent = ['Linking receipt:', name, amount, dateStr].filter(Boolean).join(' · ');
+    linkingContextText.textContent = `Linking receipt: ${[name, amount, dateStr].filter(Boolean).join(' · ')}`;
     if (linkingContextPreview) {
       linkingContextPreview.hidden = false;
       linkingContextPreview.onclick = () => openPreview(receipt.key, name);
@@ -707,7 +1317,8 @@ function updateLinkingContext() {
       return;
     }
     const dateStr = formatDateForLocale(parseDateOnly(claim.date) || new Date(claim.date));
-    linkingContextText.textContent = `Linking claim: ${claim.description} · ${formatCurrencyAmount('SGD', Number(claim.amount))} · ${dateStr}`;
+    const claimLabel = (claim.description || claim.payee || 'Claim').trim();
+    linkingContextText.textContent = `Linking claim: ${[claimLabel, formatCurrencyAmount('SGD', Number(claim.amount)), dateStr].filter(Boolean).join(' · ')}`;
     if (linkingContextPreview) linkingContextPreview.hidden = true;
     linkingDock.hidden = false;
     return;
@@ -733,7 +1344,7 @@ function updateActionBar() {
   if (linkingSource === 'receipt') {
     const selectionCount = selectedClaimIds.size;
     if (selectionCount === 0) {
-      actionText.textContent = 'Receipt selected. Tick a claim or mark ready';
+      actionText.textContent = 'Tick the claim this receipt belongs to, or mark it ready to claim without one';
       confirmSelection.hidden = true;
       confirmSelection.disabled = true;
       markReadySelection.textContent = 'Mark ready';
@@ -743,7 +1354,7 @@ function updateActionBar() {
     }
 
     actionText.textContent = `${selectionCount} claim${selectionCount === 1 ? '' : 's'} selected`;
-    confirmSelection.textContent = `Link ${selectionCount}`;
+    confirmSelection.textContent = `Link ${selectionCount} claim${selectionCount === 1 ? '' : 's'}`;
     confirmSelection.hidden = false;
     confirmSelection.disabled = false;
     markReadySelection.hidden = true;
@@ -756,14 +1367,14 @@ function updateActionBar() {
 
   const selectionCount = selectedReceiptKeys.size;
   if (selectionCount === 0) {
-    actionText.textContent = 'Claim selected. Tick receipt(s) to link';
+    actionText.textContent = 'Tick the receipt(s) for this claim';
     confirmSelection.hidden = true;
     confirmSelection.disabled = true;
     return;
   }
 
   actionText.textContent = `${selectionCount} receipt${selectionCount === 1 ? '' : 's'} selected`;
-  confirmSelection.textContent = `Link ${selectionCount}`;
+  confirmSelection.textContent = `Link ${selectionCount} receipt${selectionCount === 1 ? '' : 's'}`;
   confirmSelection.hidden = false;
   confirmSelection.disabled = false;
 }
@@ -815,12 +1426,19 @@ function applyLinkingHighlights() {
 
   receiptList.querySelectorAll('li[data-key]').forEach((li) => {
     const key = li.dataset.key;
-    const isChecked = linkingSource === 'claim' && selectedReceiptKeys.has(key);
+    const pickingForClaim = linkingSource === 'claim';
+    const isChecked = pickingForClaim && selectedReceiptKeys.has(key);
     const isSource = linkingSource === 'receipt' && sourceReceiptKey === key;
     li.classList.remove('selected');
-    li.classList.toggle('show-selector', linkingSource === 'claim');
+    li.classList.toggle('show-selector', pickingForClaim);
     li.classList.toggle('checked', isChecked);
     li.classList.toggle('source-selected', isSource);
+    const linkBtn = li.querySelector('.link-btn');
+    if (linkBtn) {
+      const label = pickingForClaim ? 'Preview receipt' : 'Link to claim';
+      linkBtn.title = label;
+      linkBtn.setAttribute('aria-label', label);
+    }
   });
 
   todoList.querySelectorAll('.todo-item[data-claim-id]').forEach((li) => {
@@ -883,16 +1501,29 @@ dropzone.addEventListener('drop', (e) => {
   uploadFiles(e.dataTransfer.files);
 });
 
-// Load YNAB TODOs
+// Load TODO claims from the selected financial backend.
 export async function loadYnabTodos() {
-  todoList.innerHTML = '<li class="loading-state"><span class="spinner"></span> Loading...</li>';
+  const requestId = ++claimsRequestId;
+  const backend = getClaimsBackend();
+  claimsLoadInFlight = true;
+  // Keep the current list on screen while refreshing; only show the spinner
+  // when there is nothing to show yet (first load, backend switch, error).
+  const hasRenderedClaims = Boolean(todoList.querySelector('.todo-item'));
+  if (hasRenderedClaims) {
+    todoList.setAttribute('aria-busy', 'true');
+  } else {
+    todoList.innerHTML = '<li class="loading-state"><span class="spinner"></span> Loading...</li>';
+  }
 
   try {
-    const response = await fetch(`${API_BASE}/ynab/todos`, {
+    const response = await fetch(`${API_BASE}/ynab/todos?backend=${encodeURIComponent(backend)}`, {
       headers: authHeaders(),
     });
 
     const data = await response.json().catch(() => null);
+    if (requestId !== claimsRequestId || backend !== getClaimsBackend()) return;
+    claimsLoadInFlight = false;
+    todoList.removeAttribute('aria-busy');
 
     if (response.status === 401 && (!data || data.error === 'Unauthorized')) {
       clearAuthToken();
@@ -910,13 +1541,21 @@ export async function loadYnabTodos() {
       return;
     }
 
+    if (data.backend !== backend) {
+      throw new Error(`Claims backend mismatch: requested ${backend}, received ${data.backend || 'unknown'}`);
+    }
+
     setClaimsLoadErrorMessage('');
-    setClaimsData(data.todos.sort((a, b) => new Date(b.date) - new Date(a.date)));
+    setClaimsData(data.todos.sort((a, b) => new Date(b.date) - new Date(a.date)), backend);
     renderOutstandingClaims();
     renderLinkedPairs();
     updateUploadZoneCompact();
+    scheduleMatchSuggestionRefresh();
   } catch (err) {
-    console.error('Failed to load YNAB todos:', err);
+    if (requestId !== claimsRequestId || backend !== getClaimsBackend()) return;
+    claimsLoadInFlight = false;
+    todoList.removeAttribute('aria-busy');
+    console.error('Failed to load claims:', err);
     resetClaimsAfterLoadFailure('Failed to load claims');
   }
 }
@@ -924,6 +1563,7 @@ export async function loadYnabTodos() {
 function getOutstandingClaims() {
   const linkedReceiptsByClaimId = new Map();
   receiptsData.forEach((receipt) => {
+    if (receiptClaimsBackend(receipt) !== claimsDataBackend) return;
     const linkedClaimIds = getLinkedClaimIds(receipt);
     linkedClaimIds.forEach((linkedClaimId) => {
       const linkedReceipts = linkedReceiptsByClaimId.get(linkedClaimId) || [];
@@ -933,6 +1573,13 @@ function getOutstandingClaims() {
   });
 
   return claimsData.filter((claim) => !linkedReceiptsByClaimId.has(claim.id));
+}
+
+function receiptClaimsBackend(receipt) {
+  if (receipt?.linkedClaimsBackend === 'howmuch' || receipt?.linkedClaimsBackend === 'ynab') {
+    return receipt.linkedClaimsBackend;
+  }
+  return getLinkedClaimIds(receipt).some((id) => !isReadyOnlyClaimId(id)) ? 'ynab' : null;
 }
 
 function renderOutstandingClaims() {
@@ -968,11 +1615,15 @@ function renderOutstandingClaims() {
     return;
   }
 
+  // The account line only earns its space when claims come from more than one account.
+  const distinctAccounts = new Set(visibleClaims.map((t) => (t.accountName || '').trim() || 'Unknown account'));
+  const showAccount = distinctAccounts.size > 1;
   todoList.innerHTML = visibleClaims
     .map((t) => {
       const accountName = (t.accountName || '').trim();
       const accountLabel = accountName || 'Unknown account';
-      const linkBtnIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      const accountLine = showAccount ? `<span class="todo-account">${escapeHtml(accountLabel)}</span>` : '';
+      const linkBtnIcon = `<svg class="icon-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
               <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
             </svg>`;
@@ -986,14 +1637,14 @@ function renderOutstandingClaims() {
           <div class="todo-content">
             <span class="todo-payee">${escapeHtml(t.description)}</span>
             <span class="todo-desc">${escapeHtml(t.payee)}</span>
-            <span class="todo-account">Account: ${escapeHtml(accountLabel)}</span>
+            ${accountLine}
           </div>
           <div class="todo-actions">
             <div class="todo-meta">
               <span class="todo-date">${formatDateForLocale(parseDateOnly(t.date) || new Date(t.date))}</span>
               <span class="todo-amount">${escapeHtml(formatClaimAmount(t.amount))}</span>
             </div>
-            <button class="link-btn claim-link-btn" title="Link receipts to this claim">
+            <button class="link-btn claim-link-btn" title="Link receipts to this claim" aria-label="Link receipts to this claim">
               ${linkBtnIcon}
             </button>
           </div>
@@ -1011,9 +1662,34 @@ function renderOutstandingClaims() {
 }
 
 refreshBtn.addEventListener('click', async () => {
-  await loadReceipts();
-  await loadYnabTodos();
+  await Promise.all([loadReceipts(), loadYnabTodos()]);
 });
+
+if (findMatchesBtn) {
+  findMatchesBtn.addEventListener('click', () => {
+    findMatches();
+  });
+}
+
+if (acceptAllClearBtn) {
+  acceptAllClearBtn.addEventListener('click', () => {
+    acceptAllClearSuggestions();
+  });
+}
+
+if (clearDismissedMatchesBtn) {
+  clearDismissedMatchesBtn.addEventListener('click', () => {
+    rejectedMatchPairs = new Set();
+    saveRejectedMatchPairs();
+    refreshMatchSuggestions({ announce: true });
+  });
+}
+
+if (matchReviewToggle) {
+  matchReviewToggle.addEventListener('click', () => {
+    setMatchReviewCollapsed(!matchReviewCollapsed);
+  });
+}
 
 if (claimFilterInput) {
   claimFilterState = loadClaimFilterState();
@@ -1023,6 +1699,7 @@ if (claimFilterInput) {
     claimFilterState.text = claimFilterInput.value;
     saveClaimFilterState();
     renderOutstandingClaims();
+    scheduleMatchSuggestionRefresh();
   });
 }
 
@@ -1041,6 +1718,7 @@ if (claimFilterPills) {
     }
     saveClaimFilterState();
     renderOutstandingClaims();
+    scheduleMatchSuggestionRefresh();
     Array.from(claimFilterPills.querySelectorAll('.claim-filter-pill'))
       .find((pill) => pill.dataset.filter === filter)
       ?.focus();
@@ -1052,6 +1730,7 @@ if (claimFilterClear) {
     claimFilterState = { text: '', quickFilters: [] };
     saveClaimFilterState();
     renderOutstandingClaims();
+    scheduleMatchSuggestionRefresh();
     claimFilterInput?.focus();
   });
 }
@@ -1122,7 +1801,7 @@ async function handleDateOverrideClick(e, li) {
     }
 
     showStatus('success', nextValue ? 'Receipt date updated' : 'Manual date override cleared');
-    loadReceipts().then(() => loadYnabTodos());
+    loadReceipts().then(refreshClaimViews);
   } catch (error) {
     console.error('Date override failed:', error);
     showStatus('error', 'Failed to update receipt date');
@@ -1142,13 +1821,10 @@ function handleLinkBtnClick(e, li) {
     return;
   }
 
+  // While picking receipts for a claim the row itself toggles selection, so
+  // this button becomes the way to look at the receipt before ticking it.
   if (linkingSource === 'claim' && sourceClaimId) {
-    if (selectedReceiptKeys.has(key)) {
-      selectedReceiptKeys.delete(key);
-    } else {
-      selectedReceiptKeys.add(key);
-    }
-    applyLinkingHighlights();
+    openPreview(key, li.dataset.name);
     return;
   }
 
@@ -1184,17 +1860,22 @@ function handleClaimLinkBtnClick(e, li) {
   startClaimLinkFlow(claimId);
 }
 
-// Handle claim click - toggle target selection while linking from receipt
-function handleClaimClick(_e, li) {
+// Handle claim click: toggle target selection while linking from a receipt,
+// otherwise start linking from this claim (the row is the big tap target).
+function handleClaimClick(e, li) {
+  if (e.target.closest('.claim-link-btn')) return;
+  const claimId = li.dataset.claimId;
   if (linkingSource === 'receipt' && sourceReceiptKey) {
-    const claimId = li.dataset.claimId;
     if (selectedClaimIds.has(claimId)) {
       selectedClaimIds.delete(claimId);
     } else {
       selectedClaimIds.add(claimId);
     }
     applyLinkingHighlights();
+    return;
   }
+  if (linkingSource === 'claim' && sourceClaimId === claimId) return;
+  startClaimLinkFlow(claimId);
 }
 
 // Step 1 from receipt side: pick source receipt, then choose claim target(s)
@@ -1240,11 +1921,27 @@ export function clearSelection() {
   applyLinkingHighlights();
 }
 
+// Cancel from the user's side: drop the selection and, on mobile, go back to
+// the tab the flow started from.
+function cancelLinking() {
+  if (!linkingSource) return;
+  const returnTab = linkingSource === 'receipt' ? 'receipts' : 'claims';
+  clearSelection();
+  if (window.innerWidth <= 700) {
+    switchTab(returnTab);
+  }
+}
+
 async function patchReceiptLink(receiptKey, claim) {
   return patchReceiptLinks(receiptKey, [claim]);
 }
 
-async function patchReceiptLinks(receiptKey, claims) {
+async function patchReceiptLinks(
+  receiptKey,
+  claims,
+  backend = getClaimsBackend(),
+  expectedClaimsBackend = undefined,
+) {
   try {
     const response = await fetch(`${API_BASE}/receipt/${encodeURIComponent(receiptKey)}/link`, {
       method: 'PATCH',
@@ -1253,6 +1950,8 @@ async function patchReceiptLinks(receiptKey, claims) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
+        backend,
+        ...(expectedClaimsBackend ? { expectedClaimsBackend } : {}),
         linkedClaims: claims.map((claim) => ({
           id: claim.id,
           description: claim.description,
@@ -1307,7 +2006,7 @@ async function linkSelectedReceiptsToClaim() {
   }
 
   clearSelection();
-  loadReceipts().then(() => loadYnabTodos());
+  loadReceipts().then(refreshClaimViews);
 }
 
 async function linkSourceReceiptToClaim() {
@@ -1333,7 +2032,7 @@ async function linkSourceReceiptToClaim() {
   }
 
   clearSelection();
-  loadReceipts().then(() => loadYnabTodos());
+  loadReceipts().then(refreshClaimViews);
 }
 
 function buildReadyClaimPayload(receipt) {
@@ -1377,7 +2076,7 @@ async function markSourceReceiptReady() {
   }
 
   clearSelection();
-  loadReceipts().then(() => loadYnabTodos());
+  loadReceipts().then(refreshClaimViews);
 }
 
 function handleConfirmSelection() {
@@ -1403,7 +2102,7 @@ async function deleteReceipt(receiptKey) {
         clearSelection();
       }
       showStatus('success', 'Receipt deleted');
-      loadReceipts().then(() => loadYnabTodos());
+      loadReceipts().then(refreshClaimViews);
       return;
     }
 
@@ -1428,7 +2127,7 @@ function buildLinkedClaimPayload(receipt, claimId, index) {
   };
 }
 
-async function unlinkClaimFromReceipt(receiptKey, claimId) {
+async function unlinkClaimFromReceipt(receiptKey, claimId, backend) {
   const receipt = receiptsData.find((item) => item.key === receiptKey);
   if (!receipt) {
     showStatus('error', 'Linked receipt not found');
@@ -1443,13 +2142,13 @@ async function unlinkClaimFromReceipt(receiptKey, claimId) {
 
   const remainingClaimIds = existingClaimIds.filter((id) => id !== claimId);
   if (remainingClaimIds.length === 0) {
-    await unlinkReceipt(receiptKey);
+    await unlinkReceipt(receiptKey, backend);
     return;
   }
 
   const remainingClaims = remainingClaimIds.map((id, index) => buildLinkedClaimPayload(receipt, id, index));
   showStatus('uploading', 'Updating linked claims...');
-  const result = await patchReceiptLinks(receiptKey, remainingClaims);
+  const result = await patchReceiptLinks(receiptKey, remainingClaims, backend, backend);
   if (!result.ok) {
     showStatus('error', result.error || 'Failed to unlink pair');
     return;
@@ -1457,20 +2156,23 @@ async function unlinkClaimFromReceipt(receiptKey, claimId) {
 
   clearSelection();
   showStatus('success', 'Unlinked claim-receipt pair');
-  loadReceipts().then(() => loadYnabTodos());
+  loadReceipts().then(refreshClaimViews);
 }
 
 // Unlink a receipt from its claim
-async function unlinkReceipt(receiptKey) {
+async function unlinkReceipt(receiptKey, backend = getClaimsBackend()) {
   try {
-    const response = await fetch(`${API_BASE}/receipt/${encodeURIComponent(receiptKey)}/link`, {
-      method: 'DELETE',
-      headers: authHeaders(),
-    });
+    const response = await fetch(
+      `${API_BASE}/receipt/${encodeURIComponent(receiptKey)}/link?backend=${encodeURIComponent(backend)}`,
+      {
+        method: 'DELETE',
+        headers: authHeaders(),
+      },
+    );
 
     if (response.ok) {
       showStatus('success', 'Receipt unlinked');
-      loadReceipts().then(() => loadYnabTodos());
+      loadReceipts().then(refreshClaimViews);
     } else {
       const data = await response.json();
       showStatus('error', data.error || 'Failed to unlink');
@@ -1482,16 +2184,16 @@ async function unlinkReceipt(receiptKey) {
 }
 
 // Cancel selection button
-cancelSelection.addEventListener('click', clearSelection);
+cancelSelection.addEventListener('click', cancelLinking);
 confirmSelection.addEventListener('click', handleConfirmSelection);
 markReadySelection.addEventListener('click', markSourceReceiptReady);
-if (linkingContextChange) {
-  linkingContextChange.addEventListener('click', () => {
-    const returnTab = linkingSource === 'receipt' ? 'receipts' : 'claims';
-    clearSelection();
-    switchTab(returnTab);
-  });
-}
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || !linkingSource) return;
+  if (document.getElementById('previewOverlay')?.classList.contains('active')) return;
+  const tag = document.activeElement?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  cancelLinking();
+});
 
 // ===== Mobile Tab Toggle =====
 
@@ -1505,6 +2207,13 @@ function switchTab(tab) {
 
 function scrollTabToggleIntoView() {
   requestAnimationFrame(() => {
+    // The header is sticky on narrow screens; tell scroll-margin-top how tall it is
+    // so the tab toggle lands below it rather than underneath it.
+    const header = document.querySelector('.app-header');
+    const stickyHeight = header && getComputedStyle(header).position === 'sticky'
+      ? header.getBoundingClientRect().height + 8
+      : 0;
+    document.documentElement.style.setProperty('--sticky-header-height', `${Math.round(stickyHeight)}px`);
     document.querySelector('.tab-toggle')?.scrollIntoView({ block: 'start' });
   });
 }
@@ -1515,4 +2224,5 @@ tabBtns.forEach(btn => {
   });
 });
 export function initClaims() {
+  renderMatchReview();
 }

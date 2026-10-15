@@ -18,6 +18,7 @@ dist/
 # Local agent/editor state
 .codex/
 .cursor/
+.amp/portals/
 
 # Playwright
 .volopay-auth.json

@@ -2,6 +2,8 @@ import { getAssetFromKV } from '@cloudflare/kv-asset-handler';
 // @ts-ignore
 import manifestJSON from '__STATIC_CONTENT_MANIFEST';
 import * as xero from './xero';
+import * as gmail from './gmail';
+import * as ai from './ai';
 import { PDFDocument } from 'pdf-lib';
 
 const assetManifest = JSON.parse(manifestJSON);
@@ -88,14 +90,21 @@ interface Env {
   AUTH_PASSWORD: string;
   YNAB_API_KEY: string;
   YNAB_BUDGET_ID: string;
+  HOWMUCH_PAT?: string;
+  HOWMUCH_PLAN_ID?: string;
+  HOWMUCH_API_URL?: string;
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
-  // Receipt vision tagging (amount extraction + GST detection): MiniMax
-  // coding-plan VLM is the primary provider for image receipts (covered by the
-  // coding-plan subscription); Gemini is the backup and handles PDFs/HEIC.
-  // Override with VISION_PROVIDER = 'gemini' | 'minimax'.
+  // Receipt vision tagging (amount extraction + GST detection) and smart
+  // matching (see worker/ai.ts). VISION_PROVIDER picks the first provider to
+  // try ('minimax' | 'anthropic' | 'gemini'); the others with keys are the
+  // fallbacks. Keys and choices saved in the app's Settings > AI (APP_SETTINGS
+  // KV) win over these secrets/vars.
   MINIMAX_API_KEY?: string;
+  ANTHROPIC_API_KEY?: string;
+  CLAUDE_MODEL?: string;
   VISION_PROVIDER?: string;
+  APP_SETTINGS?: KVNamespace;
   CORS_ORIGIN?: string; // Optional: lock CORS to specific origin
   // Xero integration (see worker/xero.ts). Client id/secret are secrets;
   // XERO_TOKENS stores the rotating refresh token.
@@ -104,6 +113,15 @@ interface Env {
   XERO_CLIENT_SECRET: string;
   XERO_SCOPES?: string;
   XERO_INPUT_TAXTYPE?: string;
+  // Gmail receipt import (see worker/gmail.ts). GOOGLE_CLIENT_ID/SECRET and
+  // CF_BROWSER_RENDERING_TOKEN are secrets; GMAIL_STATE holds linked accounts.
+  GMAIL_STATE: KVNamespace;
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
+  GMAIL_RECEIPT_QUERY?: string;
+  GMAIL_INITIAL_LOOKBACK_DAYS?: string;
+  CF_ACCOUNT_ID?: string;
+  CF_BROWSER_RENDERING_TOKEN?: string;
 }
 
 interface YnabTransaction {
@@ -137,6 +155,15 @@ interface YnabTodo {
   categoryName?: string;
   source: 'transaction' | 'subtransaction';
   parentTransactionId?: string;
+  sourceUrl?: string;
+}
+
+type ClaimsBackend = 'howmuch' | 'ynab';
+
+interface ClaimsBackendConfig {
+  apiUrl: string;
+  token: string;
+  planId: string;
 }
 
 interface GeminiAmountResult {
@@ -161,7 +188,7 @@ interface GstDetectionResult {
   gstShown: boolean;
   gstAmount: number | null;
   confidence: number;
-  source: 'minimax' | 'gemini';
+  source: ai.AiProvider;
 }
 
 interface GstTagResult {
@@ -188,6 +215,9 @@ interface LinkedClaimPayload {
 interface PushLineItem {
   receiptKey: string;
   ynabClaimId?: string | null;
+  claimSource?: 'transaction' | 'subtransaction' | null;
+  claimDescription?: string | null;
+  claimsBackend?: ClaimsBackend;
   date: string;
   description: string;
   accountCode: string;
@@ -202,8 +232,13 @@ interface ReceiptSummary {
   uploaded: string;
   storageUploaded: string;
   originalName?: string;
+  source?: string;
+  gmailAccount?: string;
+  gmailMessageId?: string;
+  gmailSubject?: string;
   linkedClaimId?: string;
   linkedClaimIds: string[];
+  linkedClaimsBackend?: ClaimsBackend;
   linkedClaimDescription?: string;
   receiptDate?: string;
   receiptDateSource?: string;
@@ -232,28 +267,44 @@ interface ReceiptSummary {
   // Set once the linked YNAB claim has been marked claimed for this bill.
   xeroInvoiceId?: string;
   invoicedAt?: string;
-  // Set after a draft exists, before the user marks the linked YNAB claims.
+  // Portal leftover from a push attempt. Not proof a bill exists in Xero.
   xeroPendingInvoiceId?: string;
   xeroPendingInvoiceNumber?: string;
   xeroPendingAt?: string;
+  xeroPendingClaimsBackend?: ClaimsBackend;
 }
 
 interface ReceiptListResult {
   receipts: ReceiptSummary[];
   cursor: string | null;
   hasMore: boolean;
+  timings: {
+    listMs: number;
+    metadataMs: number;
+    headFallbacks: number;
+  };
 }
 
-class YnabApiError extends Error {
+// Server-Timing lets the browser's Network → Timing panel show where a slow
+// request spent its time (R2 vs the claims backend) without any extra tooling.
+function serverTimingHeader(entries: Array<{ name: string; ms: number; desc?: string }>): string {
+  return entries
+    .map(({ name, ms, desc }) => `${name};dur=${Math.round(ms)}${desc ? `;desc="${desc.replace(/"/g, "'")}"` : ''}`)
+    .join(', ');
+}
+
+class ClaimsBackendApiError extends Error {
   status: number;
   details: string;
 
-  constructor(status: number, details: string) {
-    super('YNAB API error');
+  constructor(backend: ClaimsBackend, status: number, details: string) {
+    super(`${backend === 'howmuch' ? 'HowMuch' : 'YNAB'} API error`);
     this.status = status;
     this.details = details;
   }
 }
+
+class ClaimsBackendInputError extends Error {}
 
 const fxRateCache = new Map<string, { value: FxRateResult; expiresAt: number }>();
 
@@ -401,6 +452,50 @@ function sortYnabTodos(todos: YnabTodo[]): YnabTodo[] {
   return todos.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 }
 
+function howMuchTransactionUrl(config: ClaimsBackendConfig, todo: YnabTodo): string {
+  const url = new URL('/transactions', config.apiUrl);
+  url.searchParams.set('plan', config.planId);
+  url.searchParams.set('transaction', todo.parentTransactionId || todo.id);
+  if (todo.parentTransactionId) url.searchParams.set('subtransaction', todo.id);
+  return url.toString();
+}
+
+function parseExplicitClaimsBackend(value: unknown): ClaimsBackend {
+  if (value === 'howmuch' || value === 'ynab') return value;
+  throw new ClaimsBackendInputError(`Unsupported claims backend: ${String(value)}`);
+}
+
+function parseClaimsBackend(value: unknown): ClaimsBackend {
+  if (value === null || value === undefined) return 'howmuch';
+  return parseExplicitClaimsBackend(value);
+}
+
+function parseMutationBackend(value: unknown): ClaimsBackend {
+  if (value === undefined) return 'ynab';
+  return parseExplicitClaimsBackend(value);
+}
+
+function claimsBackendConfig(env: Env, backend: ClaimsBackend): ClaimsBackendConfig {
+  if (backend === 'ynab') {
+    if (!env.YNAB_API_KEY || !env.YNAB_BUDGET_ID) throw new Error('YNAB backend is not configured.');
+    return {
+      apiUrl: 'https://api.ynab.com/v1',
+      token: env.YNAB_API_KEY,
+      planId: env.YNAB_BUDGET_ID,
+    };
+  }
+
+  const planId = env.HOWMUCH_PLAN_ID || env.YNAB_BUDGET_ID;
+  if (!env.HOWMUCH_PAT || !planId) {
+    throw new Error('HowMuch backend is not configured (HOWMUCH_PAT and a plan ID are required).');
+  }
+  return {
+    apiUrl: (env.HOWMUCH_API_URL || 'https://howmuch.tk.sg/v1').replace(/\/+$/, ''),
+    token: env.HOWMUCH_PAT,
+    planId,
+  };
+}
+
 async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
@@ -423,25 +518,62 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-async function fetchYnabTodos(env: Env, sinceDate = getDefaultYnabSinceDate()): Promise<YnabTodo[]> {
-  const ynabResponse = await fetch(
-    `https://api.ynab.com/v1/plans/${encodeURIComponent(env.YNAB_BUDGET_ID)}/transactions?since_date=${encodeURIComponent(sinceDate)}`,
-    {
-      headers: {
-        Authorization: `Bearer ${env.YNAB_API_KEY}`,
-      },
-    }
-  );
+async function fetchYnabTodos(
+  env: Env,
+  sinceDate = getDefaultYnabSinceDate(),
+  backend: ClaimsBackend = 'howmuch'
+): Promise<YnabTodo[]> {
+  const config = claimsBackendConfig(env, backend);
+  let transactions: YnabTransaction[] = [];
+  let settled = false;
 
-  if (!ynabResponse.ok) {
-    const errorText = await ynabResponse.text();
-    throw new YnabApiError(ynabResponse.status, errorText);
+  for (let attempt = 0; attempt < 2 && !settled; attempt += 1) {
+    transactions = [];
+    let offset = 0;
+    let serverKnowledge: number | undefined;
+    let knowledgeChanged = false;
+
+    do {
+      const query = new URLSearchParams({ since_date: sinceDate });
+      if (backend === 'howmuch') {
+        query.set('limit', '250');
+        query.set('offset', String(offset));
+      }
+      const response = await fetch(
+        `${config.apiUrl}/plans/${encodeURIComponent(config.planId)}/transactions?${query}`,
+        { headers: { Authorization: `Bearer ${config.token}` } }
+      );
+      if (!response.ok) {
+        throw new ClaimsBackendApiError(backend, response.status, await response.text());
+      }
+
+      const body = (await response.json()) as {
+        data: {
+          transactions: YnabTransaction[];
+          has_more?: boolean;
+          next_offset?: number | null;
+          server_knowledge?: number;
+        };
+      };
+      if (backend === 'howmuch' && serverKnowledge !== undefined && body.data.server_knowledge !== serverKnowledge) {
+        knowledgeChanged = true;
+        break;
+      }
+      serverKnowledge = body.data.server_knowledge;
+      transactions.push(...body.data.transactions);
+      if (backend !== 'howmuch' || !body.data.has_more || body.data.next_offset == null) break;
+      if (body.data.next_offset <= offset) throw new Error('HowMuch returned an invalid transaction page cursor.');
+      offset = body.data.next_offset;
+    } while (true);
+
+    settled = !knowledgeChanged;
   }
 
-  const data = (await ynabResponse.json()) as { data: { transactions: YnabTransaction[] } };
+  if (!settled) throw new Error('HowMuch transactions changed repeatedly while loading; please retry.');
+
   const todos: YnabTodo[] = [];
 
-  data.data.transactions.forEach((transaction) => {
+  transactions.forEach((transaction) => {
     const subtransactionTodos: YnabTodo[] = [];
     (transaction.subtransactions || []).forEach((subtransaction) => {
       const subtransactionTodo = toYnabTodoFromSubtransaction(transaction, subtransaction);
@@ -455,6 +587,12 @@ async function fetchYnabTodos(env: Env, sinceDate = getDefaultYnabSinceDate()): 
     todos.push(...subtransactionTodos);
   });
 
+  if (backend === 'howmuch') {
+    todos.forEach((todo) => {
+      todo.sourceUrl = howMuchTransactionUrl(config, todo);
+    });
+  }
+
   return sortYnabTodos(todos);
 }
 
@@ -463,15 +601,25 @@ async function listReceiptSummaries(
   options: { limit?: number; cursor?: string } = {}
 ): Promise<ReceiptListResult> {
   const limit = Math.min(Math.max(options.limit || 100, 1), 1000);
-  const listed = await env.RECEIPTS.list({ limit, cursor: options.cursor });
+  // Ask R2 to return custom metadata inline so a page load is one list call
+  // rather than one head() per receipt. R2 may shorten a page to fit the
+  // response size; the cursor loop in the client picks up the remainder.
+  const listStarted = Date.now();
+  const listed = await env.RECEIPTS.list({ limit, cursor: options.cursor, include: ['customMetadata'] });
+  const listMs = Date.now() - listStarted;
+  const metadataStarted = Date.now();
+  let headFallbacks = 0;
 
-  // Fetch metadata for each receipt (R2 list() doesn't return customMetadata)
   const receipts = await mapWithConcurrency(
     listed.objects,
     RECEIPT_METADATA_CONCURRENCY,
     async (obj): Promise<ReceiptSummary> => {
-      const head = await env.RECEIPTS.head(obj.key);
-      const metadata = head?.customMetadata || {};
+      // Fall back to head() only if the runtime ignored `include`.
+      let metadata = obj.customMetadata;
+      if (!metadata) {
+        headFallbacks += 1;
+        metadata = (await env.RECEIPTS.head(obj.key))?.customMetadata ?? {};
+      }
       const linkedClaimIds = parseLinkedClaimIds(metadata.linkedClaimIds, metadata.linkedClaimId);
       const primaryLinkedClaimId = linkedClaimIds[0];
       return {
@@ -481,8 +629,16 @@ async function listReceiptSummaries(
         uploaded: metadata.uploadedAt || obj.uploaded.toISOString(),
         storageUploaded: obj.uploaded.toISOString(),
         originalName: metadata.originalName,
+        source: metadata.source,
+        gmailAccount: metadata.gmailAccount,
+        gmailMessageId: metadata.gmailMessageId,
+        gmailSubject: metadata.gmailSubject,
         linkedClaimId: primaryLinkedClaimId,
         linkedClaimIds,
+        linkedClaimsBackend:
+          metadata.linkedClaimsBackend === 'howmuch' ? 'howmuch'
+            : metadata.linkedClaimsBackend === 'ynab' ? 'ynab'
+              : linkedClaimIds.length > 0 ? 'ynab' : undefined,
         linkedClaimDescription: metadata.linkedClaimDescription,
         receiptDate: metadata.receiptDate,
         receiptDateSource: metadata.receiptDateSource,
@@ -514,6 +670,10 @@ async function listReceiptSummaries(
         xeroPendingInvoiceId: metadata.xeroPendingInvoiceId,
         xeroPendingInvoiceNumber: metadata.xeroPendingInvoiceNumber,
         xeroPendingAt: metadata.xeroPendingAt,
+        xeroPendingClaimsBackend:
+          metadata.xeroPendingClaimsBackend === 'ynab' ? 'ynab'
+            : metadata.xeroPendingClaimsBackend === 'howmuch' ? 'howmuch'
+              : undefined,
       };
     }
   );
@@ -522,6 +682,7 @@ async function listReceiptSummaries(
     receipts,
     cursor: listed.truncated ? listed.cursor || null : null,
     hasMore: listed.truncated,
+    timings: { listMs, metadataMs: Date.now() - metadataStarted, headFallbacks },
   };
 }
 
@@ -679,30 +840,39 @@ async function getUsdSgdRate(date: string): Promise<FxRateResult> {
 async function patchReceiptMetadata(
   env: Env,
   key: string,
-  metadataPatch: Record<string, string | undefined>
+  metadataPatch: Record<string, string | undefined>,
+  expectedClaimsBackend?: ClaimsBackend
 ): Promise<boolean> {
-  const existing = await env.RECEIPTS.get(key);
-  if (!existing) return false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const existing = await env.RECEIPTS.get(key);
+    if (!existing) return false;
 
-  const content = await existing.arrayBuffer();
-  const mergedMetadata: Record<string, string> = {
-    ...(existing.customMetadata || {}),
-  };
-
-  Object.entries(metadataPatch).forEach(([metaKey, value]) => {
-    if (value === undefined) {
-      delete mergedMetadata[metaKey];
-      return;
+    const content = await existing.arrayBuffer();
+    const mergedMetadata: Record<string, string> = {
+      ...(existing.customMetadata || {}),
+    };
+    const currentClaimsBackend = mergedMetadata.linkedClaimsBackend === 'howmuch' ? 'howmuch' : 'ynab';
+    if (expectedClaimsBackend && currentClaimsBackend !== expectedClaimsBackend) {
+      throw new ClaimsBackendInputError('Receipt link belongs to a different claims backend.');
     }
-    mergedMetadata[metaKey] = value;
-  });
 
-  await env.RECEIPTS.put(key, content, {
-    httpMetadata: existing.httpMetadata,
-    customMetadata: mergedMetadata,
-  });
+    Object.entries(metadataPatch).forEach(([metaKey, value]) => {
+      if (value === undefined) {
+        delete mergedMetadata[metaKey];
+        return;
+      }
+      mergedMetadata[metaKey] = value;
+    });
 
-  return true;
+    const updated = await env.RECEIPTS.put(key, content, {
+      onlyIf: { etagMatches: existing.etag },
+      httpMetadata: existing.httpMetadata,
+      customMetadata: mergedMetadata,
+    });
+    if (updated) return true;
+  }
+
+  throw new Error(`Receipt metadata changed concurrently: ${key}`);
 }
 
 async function callGeminiWithFile(
@@ -807,17 +977,28 @@ async function extractAmountWithMiniMax(env: Env, fileBuffer: ArrayBuffer, mimeT
   };
 }
 
-// Provider-aware amount extraction: MiniMax for image receipts, Gemini as
-// backup and for PDFs/HEIC.
-async function extractReceiptAmount(env: Env, fileBuffer: ArrayBuffer, mimeType: string): Promise<GeminiAmountResult> {
-  if (useMiniMaxFor(env, mimeType)) {
-    try {
-      return await extractAmountWithMiniMax(env, fileBuffer, mimeType);
-    } catch {
-      if (!env.GEMINI_API_KEY) throw new Error('MiniMax amount extraction failed and GEMINI_API_KEY is not configured');
-    }
+async function extractAmountWithClaude(env: Env, fileBuffer: ArrayBuffer, mimeType: string): Promise<GeminiAmountResult> {
+  const { text, model } = await ai.callClaudeWithFile(env, AMOUNT_PROMPT, ai.AMOUNT_SCHEMA, fileBuffer, mimeType, toBase64);
+
+  const parsed = parseGeminiJson(text);
+  if (!parsed) {
+    throw new Error('Claude amount response was not valid JSON');
   }
-  return extractAmountWithGemini(env, fileBuffer, mimeType);
+
+  return {
+    ...parsed,
+    model,
+  };
+}
+
+// Provider-aware amount extraction: the preferred provider first, then any
+// other provider with a key that can read this file type.
+async function extractReceiptAmount(env: Env, fileBuffer: ArrayBuffer, mimeType: string): Promise<GeminiAmountResult> {
+  return runVisionChain(env, mimeType, 'Amount extraction', {
+    minimax: () => extractAmountWithMiniMax(env, fileBuffer, mimeType),
+    anthropic: () => extractAmountWithClaude(env, fileBuffer, mimeType),
+    gemini: () => extractAmountWithGemini(env, fileBuffer, mimeType),
+  });
 }
 
 const GST_PROMPT = [
@@ -920,28 +1101,71 @@ async function detectGstWithGemini(env: Env, fileBuffer: ArrayBuffer, mimeType: 
   return { ...parsed, source: 'gemini' };
 }
 
-function visionProvider(env: Env): 'minimax' | 'gemini' {
-  const configured = (env.VISION_PROVIDER || '').toLowerCase();
-  if (configured === 'gemini') return 'gemini';
-  if (configured === 'minimax') return 'minimax';
-  return env.MINIMAX_API_KEY ? 'minimax' : 'gemini';
+async function detectGstWithClaude(env: Env, fileBuffer: ArrayBuffer, mimeType: string): Promise<GstDetectionResult> {
+  const { text } = await ai.callClaudeWithFile(env, GST_PROMPT, ai.GST_SCHEMA, fileBuffer, mimeType, toBase64);
+
+  const parsed = parseGstJson(text);
+  if (!parsed) {
+    throw new Error('Claude GST response was not valid JSON');
+  }
+
+  return { ...parsed, source: 'anthropic' };
 }
 
-function useMiniMaxFor(env: Env, mimeType: string): boolean {
-  return visionProvider(env) === 'minimax' && !!env.MINIMAX_API_KEY && MINIMAX_IMAGE_MIMES.includes(mimeType);
+// Fallback order after the preferred provider. MiniMax is covered by the
+// coding-plan subscription, so it goes first when it can read the file.
+const VISION_FALLBACK_ORDER: ai.AiProvider[] = ['minimax', 'anthropic', 'gemini'];
+
+function visionKey(env: Env, provider: ai.AiProvider): string | undefined {
+  if (provider === 'minimax') return env.MINIMAX_API_KEY;
+  if (provider === 'anthropic') return env.ANTHROPIC_API_KEY;
+  return env.GEMINI_API_KEY;
 }
 
-// MiniMax (coding-plan VLM) is the primary GST detector for image receipts;
-// Gemini is the backup and the only option for PDFs/HEIC.
-async function detectReceiptGst(env: Env, fileBuffer: ArrayBuffer, mimeType: string): Promise<GstDetectionResult> {
-  if (useMiniMaxFor(env, mimeType)) {
+function visionSupports(provider: ai.AiProvider, mimeType: string): boolean {
+  if (provider === 'minimax') return MINIMAX_IMAGE_MIMES.includes(mimeType);
+  if (provider === 'anthropic') return ai.claudeSupports(mimeType);
+  return true; // Gemini reads images, PDFs and HEIC
+}
+
+function hasVisionKey(env: Env): boolean {
+  return VISION_FALLBACK_ORDER.some((provider) => Boolean(visionKey(env, provider)));
+}
+
+function visionProviders(env: Env, mimeType: string): ai.AiProvider[] {
+  const preferred = ai.preferredVisionProvider(env);
+  return [preferred, ...VISION_FALLBACK_ORDER.filter((p) => p !== preferred)].filter(
+    (provider) => Boolean(visionKey(env, provider)) && visionSupports(provider, mimeType)
+  );
+}
+
+async function runVisionChain<T>(
+  env: Env,
+  mimeType: string,
+  task: string,
+  run: Record<ai.AiProvider, () => Promise<T>>
+): Promise<T> {
+  const providers = visionProviders(env, mimeType);
+  if (providers.length === 0) {
+    throw new Error(`No AI provider with a key can read ${mimeType || 'this file type'}`);
+  }
+  const errors: string[] = [];
+  for (const provider of providers) {
     try {
-      return await detectGstWithMiniMax(env, fileBuffer, mimeType);
-    } catch {
-      if (!env.GEMINI_API_KEY) throw new Error('MiniMax GST detection failed and GEMINI_API_KEY is not configured');
+      return await run[provider]();
+    } catch (error) {
+      errors.push(`${provider}: ${cleanError(error).slice(0, 80)}`);
     }
   }
-  return detectGstWithGemini(env, fileBuffer, mimeType);
+  throw new Error(`${task} failed. ${errors.join('; ')}`);
+}
+
+async function detectReceiptGst(env: Env, fileBuffer: ArrayBuffer, mimeType: string): Promise<GstDetectionResult> {
+  return runVisionChain(env, mimeType, 'GST detection', {
+    minimax: () => detectGstWithMiniMax(env, fileBuffer, mimeType),
+    anthropic: () => detectGstWithClaude(env, fileBuffer, mimeType),
+    gemini: () => detectGstWithGemini(env, fileBuffer, mimeType),
+  });
 }
 
 function buildGstMetadataPatch(gst: GstDetectionResult): Record<string, string | undefined> {
@@ -956,6 +1180,7 @@ function buildGstMetadataPatch(gst: GstDetectionResult): Record<string, string |
 }
 
 async function tagReceiptGst(env: Env, key: string, options: { force?: boolean } = {}): Promise<GstTagResult> {
+  env = await ai.withAiSettings(env);
   const object = await env.RECEIPTS.get(key);
   if (!object) {
     return { key, status: 'failed', reason: 'receipt_not_found' };
@@ -993,6 +1218,7 @@ async function tagPendingGst(env: Env, limit: number): Promise<{
   remaining: number;
   results: GstTagResult[];
 }> {
+  env = await ai.withAiSettings(env);
   const listed = await env.RECEIPTS.list({ limit: 1000 });
   const candidateKeys: string[] = [];
   let remaining = 0;
@@ -1025,7 +1251,8 @@ async function tagPendingGst(env: Env, limit: number): Promise<{
 }
 
 async function tagReceiptAmount(env: Env, key: string, options: { force?: boolean } = {}): Promise<AmountTagResult> {
-  if (!env.GEMINI_API_KEY && !env.MINIMAX_API_KEY) {
+  env = await ai.withAiSettings(env);
+  if (!hasVisionKey(env)) {
     return { key, status: 'skipped', reason: 'missing_vision_api_key' };
   }
 
@@ -1156,6 +1383,7 @@ async function tagPendingReceipts(env: Env, limit: number): Promise<{
   failed: number;
   results: AmountTagResult[];
 }> {
+  env = await ai.withAiSettings(env);
   const scanLimit = Math.min(Math.max(limit * 4, limit), 200);
   const listed = await env.RECEIPTS.list({ limit: scanLimit });
   const candidateKeys: string[] = [];
@@ -1208,7 +1436,7 @@ function getCorsHeaders(request: Request, env: Env): Record<string, string> {
 
   return {
     'Access-Control-Allow-Origin': effectiveOrigin,
-    'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, X-Auth-Token',
     Vary: 'Origin', // Prevent caches from serving wrong CORS headers
   };
@@ -1270,26 +1498,86 @@ function addCalendarDays(date: string, days: number): string {
 }
 
 function parsePushLineItems(raw: unknown): PushLineItem[] {
-  return (Array.isArray(raw) ? raw : [])
-    .filter(
-      (l) =>
-        l &&
-        typeof l.receiptKey === 'string' && l.receiptKey &&
-        typeof l.description === 'string' && l.description.trim() &&
-        typeof l.accountCode === 'string' && l.accountCode &&
-        typeof l.taxType === 'string' && l.taxType &&
-        Number(l.amount) > 0
-    )
-    .map((l) => ({
-      receiptKey: l.receiptKey,
-      ynabClaimId: typeof l.ynabClaimId === 'string' ? l.ynabClaimId : null,
-      date: typeof l.date === 'string' ? l.date : '',
-      description: l.description.trim(),
-      accountCode: l.accountCode,
-      taxType: l.taxType,
-      currency: typeof l.currency === 'string' ? l.currency : undefined,
-      amount: Number(l.amount),
-    }));
+  if (!Array.isArray(raw)) return [];
+
+  return raw.map((value, index) => {
+    if (!value || typeof value !== 'object') {
+      throw new ClaimsBackendInputError(`Invalid invoice line ${index + 1}.`);
+    }
+    const line = value as Record<string, unknown>;
+    const amount = line.amount;
+    if (
+      typeof line.receiptKey !== 'string' || !line.receiptKey.trim() ||
+      typeof line.description !== 'string' || !line.description.trim() ||
+      typeof line.accountCode !== 'string' || !line.accountCode.trim() ||
+      typeof line.taxType !== 'string' || !line.taxType.trim() ||
+      typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0
+    ) {
+      throw new ClaimsBackendInputError(
+        `Invalid invoice line ${index + 1}: receipt, description, positive amount, account and tax code are required.`
+      );
+    }
+    if (
+      line.ynabClaimId !== undefined && line.ynabClaimId !== null &&
+      typeof line.ynabClaimId !== 'string'
+    ) {
+      throw new ClaimsBackendInputError(`Invalid claim ID on invoice line ${index + 1}.`);
+    }
+    if (
+      line.claimSource !== undefined && line.claimSource !== null &&
+      line.claimSource !== 'transaction' && line.claimSource !== 'subtransaction'
+    ) {
+      throw new ClaimsBackendInputError(`Invalid claim source on invoice line ${index + 1}.`);
+    }
+    if (line.date !== undefined && typeof line.date !== 'string') {
+      throw new ClaimsBackendInputError(`Invalid date on invoice line ${index + 1}.`);
+    }
+    if (line.claimDescription !== undefined && line.claimDescription !== null && typeof line.claimDescription !== 'string') {
+      throw new ClaimsBackendInputError(`Invalid claim description on invoice line ${index + 1}.`);
+    }
+    if (line.currency !== undefined && typeof line.currency !== 'string') {
+      throw new ClaimsBackendInputError(`Invalid currency on invoice line ${index + 1}.`);
+    }
+
+    return {
+      receiptKey: line.receiptKey,
+      ynabClaimId: typeof line.ynabClaimId === 'string' ? line.ynabClaimId : null,
+      claimSource:
+        line.claimSource === 'transaction' || line.claimSource === 'subtransaction' ? line.claimSource : null,
+      claimDescription: typeof line.claimDescription === 'string' ? line.claimDescription.trim() : null,
+      claimsBackend:
+        line.claimsBackend === undefined ? undefined : parseExplicitClaimsBackend(line.claimsBackend),
+      date: typeof line.date === 'string' ? line.date : '',
+      description: line.description.trim(),
+      accountCode: line.accountCode.trim(),
+      taxType: line.taxType.trim(),
+      currency: typeof line.currency === 'string' ? line.currency : undefined,
+      amount,
+    };
+  });
+}
+
+function resolveMutationBackend(value: unknown, lineItems: PushLineItem[]): ClaimsBackend {
+  const claimLines = lineItems.filter((line) => line.ynabClaimId);
+  if (value === undefined) {
+    if (claimLines.some((line) => line.claimsBackend !== undefined)) {
+      throw new ClaimsBackendInputError('Request backend is required when line-item backend provenance is present.');
+    }
+    return 'ynab';
+  }
+
+  const bodyBackend = parseExplicitClaimsBackend(value);
+  if (claimLines.some((line) => line.claimsBackend === undefined)) {
+    throw new ClaimsBackendInputError('Every claim-bearing line must include backend provenance.');
+  }
+  const lineBackends = Array.from(new Set(claimLines.map((line) => line.claimsBackend)));
+  if (lineBackends.length > 1) {
+    throw new ClaimsBackendInputError('Line items from different claims backends cannot be processed together.');
+  }
+  if (lineBackends.length === 1 && lineBackends[0] !== bodyBackend) {
+    throw new ClaimsBackendInputError('Line-item backend does not match the request backend.');
+  }
+  return lineBackends[0] || bodyBackend;
 }
 
 function nonGstTaxTypeForCurrency(currency?: string): string {
@@ -1526,6 +1814,9 @@ async function buildClaimReceiptPdf(
 }
 
 type YnabClaimResult = { status: 'claimed' | 'skipped' | 'failed'; detail?: string };
+type ClaimLine = PushLineItem & { ynabClaimId: string };
+
+const HOWMUCH_UPDATE_BATCH_SIZE = 100;
 
 async function readYnabError(response: Response): Promise<string> {
   const text = await response.text();
@@ -1540,12 +1831,92 @@ async function readYnabError(response: Response): Promise<string> {
   return text.replace(/\s+/g, ' ').slice(0, 180);
 }
 
-// Flip a YNAB transaction memo from "TODO: ..." to "CLAIMED - YYYY-MM-DD: ...".
-async function markYnabClaimed(env: Env, transactionId: string, claimedDate = singaporeToday()): Promise<YnabClaimResult> {
-  if (transactionId.includes('_st_')) return { status: 'skipped', detail: 'Subtransactions must be updated manually in YNAB.' };
+async function markHowMuchClaimed(
+  env: Env,
+  claims: ClaimLine[],
+  claimedDate = singaporeToday()
+): Promise<Array<{ id: string; status: string; detail?: string }>> {
+  const results = new Map<string, YnabClaimResult>();
+  const pending = claims.filter((claim) => {
+    if (claim.claimSource === 'subtransaction' || claim.ynabClaimId.includes('_st_')) {
+      results.set(claim.ynabClaimId, { status: 'skipped', detail: 'Subtransactions must be updated manually.' });
+      return false;
+    }
+    if (!claim.claimDescription) {
+      results.set(claim.ynabClaimId, { status: 'failed', detail: 'Original claim description is missing; refresh and retry.' });
+      return false;
+    }
+    return true;
+  });
+  if (pending.length === 0) {
+    return claims.map((claim) => ({ id: claim.ynabClaimId, ...results.get(claim.ynabClaimId)! }));
+  }
+  const config = claimsBackendConfig(env, 'howmuch');
+
+  for (let offset = 0; offset < pending.length; offset += HOWMUCH_UPDATE_BATCH_SIZE) {
+    const batch = pending.slice(offset, offset + HOWMUCH_UPDATE_BATCH_SIZE);
+    const updates = batch.map((claim) => ({
+      id: claim.ynabClaimId,
+      memo: `CLAIMED - ${claimedDate}: ${claim.claimDescription}`,
+    }));
+
+    try {
+      const response = await fetch(`${config.apiUrl}/plans/${encodeURIComponent(config.planId)}/transactions`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transactions: updates }),
+      });
+      if (!response.ok) {
+        const detail = await readYnabError(response);
+        batch.forEach((claim) => results.set(claim.ynabClaimId, { status: 'failed', detail }));
+        break;
+      }
+
+      const body = (await response.json()) as {
+        data?: { transactions?: Array<{ id?: string; memo?: string | null }> };
+      };
+      const returned = new Map((body.data?.transactions || []).map((transaction) => [transaction.id, transaction.memo]));
+      batch.forEach((claim, index) => {
+        const update = updates[index];
+        results.set(
+          claim.ynabClaimId,
+          returned.get(claim.ynabClaimId) === update.memo
+            ? { status: 'claimed' }
+            : { status: 'failed', detail: 'HowMuch did not confirm the requested memo update.' }
+        );
+      });
+      if (batch.some((claim) => results.get(claim.ynabClaimId)?.status === 'failed')) break;
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      batch.forEach((claim) => results.set(claim.ynabClaimId, { status: 'failed', detail }));
+      break;
+    }
+  }
+
+  pending.forEach((claim) => {
+    if (!results.has(claim.ynabClaimId)) {
+      results.set(claim.ynabClaimId, { status: 'failed', detail: 'Not attempted after a HowMuch batch update failed.' });
+    }
+  });
+  return claims.map((claim) => ({ id: claim.ynabClaimId, ...results.get(claim.ynabClaimId)! }));
+}
+
+// Flip a transaction memo from "TODO: ..." to "CLAIMED - YYYY-MM-DD: ...".
+async function markYnabClaimed(
+  env: Env,
+  transactionId: string,
+  claimedDate = singaporeToday(),
+  backend: ClaimsBackend = 'howmuch',
+  source: 'transaction' | 'subtransaction' | null = null
+): Promise<YnabClaimResult> {
+  if (source === 'subtransaction' || transactionId.includes('_st_')) {
+    return { status: 'skipped', detail: 'Subtransactions must be updated manually.' };
+  }
   try {
-    const base = `https://api.ynab.com/v1/plans/${encodeURIComponent(env.YNAB_BUDGET_ID)}/transactions/${encodeURIComponent(transactionId)}`;
-    const getRes = await fetch(base, { headers: { Authorization: `Bearer ${env.YNAB_API_KEY}` } });
+    const config = claimsBackendConfig(env, backend);
+    const base = `${config.apiUrl}/plans/${encodeURIComponent(config.planId)}/transactions/${encodeURIComponent(transactionId)}`;
+    const authHeaders = { Authorization: `Bearer ${config.token}` };
+    const getRes = await fetch(base, { headers: authHeaders });
     if (!getRes.ok) return { status: 'failed', detail: await readYnabError(getRes) };
     const getData = (await getRes.json()) as { data?: { transaction?: { memo?: string | null } } };
     const memo = getData.data?.transaction?.memo || '';
@@ -1555,7 +1926,7 @@ async function markYnabClaimed(env: Env, transactionId: string, claimedDate = si
       : `CLAIMED - ${claimedDate}: ${memo}`.trim();
     const putRes = await fetch(base, {
       method: 'PUT',
-      headers: { Authorization: `Bearer ${env.YNAB_API_KEY}`, 'Content-Type': 'application/json' },
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
       body: JSON.stringify({ transaction: { memo: newMemo } }),
     });
     return putRes.ok ? { status: 'claimed' } : { status: 'failed', detail: await readYnabError(putRes) };
@@ -1564,7 +1935,105 @@ async function markYnabClaimed(env: Env, transactionId: string, claimedDate = si
   }
 }
 
+// --- Gmail receipt import -----------------------------------------------------
+
+// Stores one file found by the Gmail scan the same way POST /upload does, and
+// queues amount/GST tagging for it.
+function gmailImporter(env: Env, ctx: ExecutionContext): gmail.ImportFile {
+  return async (file) => {
+    if (file.bytes.byteLength > MAX_FILE_SIZE) return { error: 'file too large' };
+    const mimeType = normaliseMimeType(file.mimeType);
+    const ext = getUploadExtension(file.filename, mimeType) || MIME_EXT[mimeType] || '';
+    if (!ext) return { error: 'unsupported file type' };
+    if (!validateMagicBytes(file.bytes, mimeType)) return { error: 'content does not match its type' };
+
+    const key = generateKey(buildStorageFilename(file.filename, ext));
+    const subject = sanitiseLabel(file.subject, 80);
+    await env.RECEIPTS.put(key, file.bytes, {
+      httpMetadata: { contentType: mimeType || EXT_MIME[ext] || 'application/octet-stream' },
+      customMetadata: {
+        originalName: file.filename,
+        uploadedAt: new Date().toISOString(),
+        source: 'gmail',
+        gmailAccount: file.account,
+        gmailMessageId: file.messageId,
+        // R2 caps custom metadata at 2 KB in total, so keep this short.
+        ...(subject ? { gmailSubject: subject } : {}),
+      },
+    });
+    ctx.waitUntil(tagReceiptAmount(env, key));
+    return { key };
+  };
+}
+
+function optionalText(value: unknown, max = 120): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : undefined;
+}
+
+function optionalIsoDate(value: unknown): string | undefined {
+  return (typeof value === 'string' && extractIsoDate(value)) || undefined;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number.parseFloat(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseMatchClaims(value: unknown): ai.MatchClaim[] {
+  if (!Array.isArray(value)) return [];
+  const claims: ai.MatchClaim[] = [];
+  for (const item of value.slice(0, ai.MAX_MATCH_CLAIMS)) {
+    const raw = (item || {}) as Record<string, unknown>;
+    const id = optionalText(raw.id, 200);
+    const date = optionalIsoDate(raw.date);
+    const amount = optionalNumber(raw.amount);
+    if (!id || !date || amount === undefined) continue;
+    claims.push({ id, date, amount, payee: optionalText(raw.payee), description: optionalText(raw.description) });
+  }
+  return claims;
+}
+
+function parseMatchReceipts(value: unknown): ai.MatchReceipt[] {
+  if (!Array.isArray(value)) return [];
+  const receipts: ai.MatchReceipt[] = [];
+  for (const item of value.slice(0, ai.MAX_MATCH_RECEIPTS)) {
+    const raw = (item || {}) as Record<string, unknown>;
+    const key = optionalText(raw.key, 500);
+    if (!key) continue;
+    receipts.push({
+      key,
+      filename: optionalText(raw.filename),
+      uploaded: optionalIsoDate(raw.uploaded),
+      receiptDate: optionalIsoDate(raw.receiptDate),
+      amount: optionalNumber(raw.amount),
+      currency: optionalText(raw.currency, 12),
+      amountSgdApprox: optionalNumber(raw.amountSgdApprox),
+      vendor: optionalText(raw.vendor),
+      purpose: optionalText(raw.purpose),
+    });
+  }
+  return receipts;
+}
+
+function jsonResponse(body: unknown, corsHeaders: Record<string, string>, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  });
+}
+
 export default {
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    const result = await gmail.scanAll(env, gmailImporter(env, ctx));
+    for (const account of result.accounts) {
+      console.log(
+        `gmail scan ${account.email}: ${account.imported.length} imported, ${account.checked} checked` +
+          (account.errors.length ? `, errors: ${account.errors.join('; ')}` : '')
+      );
+    }
+    if (result.skipped) console.log(`gmail scan skipped: ${result.skipped}`);
+  },
+
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -1584,14 +2053,15 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // Check auth for API routes. /xero/* is gated too, EXCEPT /xero/callback,
+    // Check auth for API routes. /xero/* and /gmail/* are gated too, EXCEPT their /callback,
     // which Xero itself calls and which is trusted via its one-time state cookie.
     // (/xero/connect is a header-authed POST so the auth token never lands in a URL.)
     const isApiRoute =
-      ['/upload', '/list', '/receipt/', '/ynab/', '/amount-tags/', '/gst-tags/', '/agent/'].some(
+      ['/upload', '/list', '/receipt/', '/ynab/', '/amount-tags/', '/gst-tags/', '/agent/', '/ai/'].some(
         (route) => path === route || path.startsWith(route)
       ) ||
-      (path.startsWith('/xero/') && path !== '/xero/callback');
+      (path.startsWith('/xero/') && path !== '/xero/callback') ||
+      (path.startsWith('/gmail/') && path !== '/gmail/callback');
 
     if (isApiRoute && !validateAuth(request, env)) {
       return new Response(JSON.stringify({ error: 'Unauthorized' }), {
@@ -1679,14 +2149,27 @@ export default {
             cursor: result.cursor,
             hasMore: result.hasMore,
           }),
-          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          {
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'application/json',
+              'Server-Timing': serverTimingHeader([
+                { name: 'r2-list', ms: result.timings.listMs, desc: `${result.receipts.length} receipts` },
+                {
+                  name: 'r2-metadata',
+                  ms: result.timings.metadataMs,
+                  desc: result.timings.headFallbacks ? `${result.timings.headFallbacks} head() fallbacks` : 'inline',
+                },
+              ]),
+            },
+          }
         );
       }
 
       // POST /amount-tags/pending - Tag a batch of untagged, unlinked pending receipts
       if (path === '/amount-tags/pending' && request.method === 'POST') {
-        if (!env.GEMINI_API_KEY && !env.MINIMAX_API_KEY) {
-          return new Response(JSON.stringify({ error: 'Neither MINIMAX_API_KEY nor GEMINI_API_KEY is configured' }), {
+        if (!hasVisionKey(await ai.withAiSettings(env))) {
+          return new Response(JSON.stringify({ error: 'No AI key is set. Add one under Settings > AI.' }), {
             status: 400,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
@@ -1708,8 +2191,8 @@ export default {
       // no GST verdict yet (includes linked/ready-to-claim receipts; skips
       // anything already pushed to Xero). Used to backfill existing receipts.
       if (path === '/gst-tags/pending' && request.method === 'POST') {
-        if (!env.MINIMAX_API_KEY && !env.GEMINI_API_KEY) {
-          return new Response(JSON.stringify({ error: 'Neither MINIMAX_API_KEY nor GEMINI_API_KEY is configured' }), {
+        if (!hasVisionKey(await ai.withAiSettings(env))) {
+          return new Response(JSON.stringify({ error: 'No AI key is set. Add one under Settings > AI.' }), {
             status: 400,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
@@ -1747,6 +2230,36 @@ export default {
 
         return new Response(JSON.stringify(result), {
           status: statusCode,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // PATCH /receipt/:key/xero-pending - drop leftover draft-push stamps only.
+      // Never deletes the receipt object. Never marks claims CLAIMED.
+      if (path.startsWith('/receipt/') && path.endsWith('/xero-pending') && request.method === 'PATCH') {
+        const key = decodeURIComponent(path.replace('/receipt/', '').replace('/xero-pending', ''));
+        const body = (await request.json().catch(() => ({}))) as { clear?: unknown };
+        if (body.clear !== true) {
+          return new Response(JSON.stringify({ error: 'Pass { "clear": true } to drop leftover draft stamps.' }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        const updated = await patchReceiptMetadata(env, key, {
+          xeroPendingInvoiceId: undefined,
+          xeroPendingInvoiceNumber: undefined,
+          xeroPendingAt: undefined,
+          xeroPendingClaimsBackend: undefined,
+        });
+        if (!updated) {
+          return new Response(JSON.stringify({ error: 'Receipt not found' }), {
+            status: 404,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        return new Response(JSON.stringify({ success: true, key, cleared: ['xeroPendingInvoiceId', 'xeroPendingInvoiceNumber', 'xeroPendingAt', 'xeroPendingClaimsBackend'] }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
@@ -1833,12 +2346,21 @@ export default {
       if (path.startsWith('/receipt/') && path.endsWith('/link') && request.method === 'PATCH') {
         const key = decodeURIComponent(path.replace('/receipt/', '').replace('/link', ''));
         const body = (await request.json()) as {
+          backend?: unknown;
+          expectedClaimsBackend?: unknown;
           linkedClaimId?: string;
           linkedClaimDescription?: string;
           linkedClaimAmount?: number;
           linkedClaimDate?: string;
           linkedClaims?: LinkedClaimPayload[];
         };
+        const backend = parseMutationBackend(body.backend);
+        const expectedClaimsBackend = body.expectedClaimsBackend === undefined
+          ? undefined
+          : parseExplicitClaimsBackend(body.expectedClaimsBackend);
+        if (expectedClaimsBackend && expectedClaimsBackend !== backend) {
+          throw new ClaimsBackendInputError('Expected claims backend must match the link backend.');
+        }
 
         const linkedClaims = Array.isArray(body.linkedClaims) && body.linkedClaims.length > 0
           ? body.linkedClaims
@@ -1884,7 +2406,8 @@ export default {
           linkedClaimAmount:
             typeof primaryClaim.amount === 'number' ? String(primaryClaim.amount) : undefined,
           linkedClaimDate: primaryClaim.date,
-        });
+          linkedClaimsBackend: backend,
+        }, expectedClaimsBackend);
         if (!updated) {
           return new Response(JSON.stringify({ error: 'Receipt not found' }), {
             status: 404,
@@ -1900,6 +2423,9 @@ export default {
       // DELETE /receipt/:key/link - Unlink a receipt from a claim
       if (path.startsWith('/receipt/') && path.endsWith('/link') && request.method === 'DELETE') {
         const key = decodeURIComponent(path.replace('/receipt/', '').replace('/link', ''));
+        const backend = parseMutationBackend(
+          url.searchParams.has('backend') ? url.searchParams.get('backend') : undefined
+        );
 
         const updated = await patchReceiptMetadata(env, key, {
           linkedClaimId: undefined,
@@ -1907,7 +2433,8 @@ export default {
           linkedClaimDescription: undefined,
           linkedClaimAmount: undefined,
           linkedClaimDate: undefined,
-        });
+          linkedClaimsBackend: undefined,
+        }, backend);
         if (!updated) {
           return new Response(JSON.stringify({ error: 'Receipt not found' }), {
             status: 404,
@@ -1920,26 +2447,35 @@ export default {
         });
       }
 
-      // GET /ynab/todos - Fetch pending claims from YNAB
+      // GET /ynab/todos - Fetch pending claims from HowMuch (default) or YNAB.
       if (path === '/ynab/todos' && request.method === 'GET') {
         try {
           const sinceDate = extractIsoDate(url.searchParams.get('since_date')) || getDefaultYnabSinceDate();
-          const todos = await fetchYnabTodos(env, sinceDate);
+          const backend = parseClaimsBackend(url.searchParams.get('backend'));
+          const upstreamStarted = Date.now();
+          const todos = await fetchYnabTodos(env, sinceDate, backend);
+          const upstreamMs = Date.now() - upstreamStarted;
 
-          return new Response(JSON.stringify({ todos }), {
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          return new Response(JSON.stringify({ todos, backend }), {
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'application/json',
+              'Server-Timing': serverTimingHeader([
+                { name: 'claims-upstream', ms: upstreamMs, desc: `${backend} since ${sinceDate}, ${todos.length} todos` },
+              ]),
+            },
           });
         } catch (error) {
-          if (error instanceof YnabApiError) {
-            return new Response(JSON.stringify({ error: 'YNAB API error', details: error.details }), {
+          if (error instanceof ClaimsBackendApiError) {
+            return new Response(JSON.stringify({ error: error.message, details: error.details }), {
               status: error.status,
               headers: { ...corsHeaders, 'Content-Type': 'application/json' },
             });
           }
 
-          const message = error instanceof Error ? error.message : 'Failed to fetch YNAB data';
+          const message = error instanceof Error ? error.message : 'Failed to fetch claims data';
           return new Response(JSON.stringify({ error: message }), {
-            status: 500,
+            status: error instanceof ClaimsBackendInputError ? 400 : 500,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         }
@@ -1949,13 +2485,15 @@ export default {
       if (path === '/agent/unclaimed-expenditures' && request.method === 'GET') {
         try {
           const sinceDate = extractIsoDate(url.searchParams.get('since_date')) || getDefaultYnabSinceDate();
+          const backend = parseClaimsBackend(url.searchParams.get('backend'));
           const [todos, receiptResult] = await Promise.all([
-            fetchYnabTodos(env, sinceDate),
+            fetchYnabTodos(env, sinceDate, backend),
             listAllReceiptSummaries(env),
           ]);
 
           const linkedReceiptsByClaimId = new Map<string, ReceiptSummary[]>();
           receiptResult.receipts.forEach((receipt) => {
+            if (receipt.linkedClaimsBackend !== backend) return;
             receipt.linkedClaimIds.forEach((claimId) => {
               const linkedReceipts = linkedReceiptsByClaimId.get(claimId) || [];
               linkedReceipts.push(receipt);
@@ -1981,6 +2519,7 @@ export default {
             JSON.stringify({
               generatedAt: new Date().toISOString(),
               sinceDate,
+              backend,
               summary: {
                 todoClaimCount: todos.length,
                 missingReceiptClaimCount: missingReceiptClaims.length,
@@ -1997,8 +2536,8 @@ export default {
             }
           );
         } catch (error) {
-          if (error instanceof YnabApiError) {
-            return new Response(JSON.stringify({ error: 'YNAB API error', details: error.details }), {
+          if (error instanceof ClaimsBackendApiError) {
+            return new Response(JSON.stringify({ error: error.message, details: error.details }), {
               status: error.status,
               headers: { ...corsHeaders, 'Content-Type': 'application/json' },
             });
@@ -2006,10 +2545,158 @@ export default {
 
           const message = error instanceof Error ? error.message : 'Failed to build agent claim report';
           return new Response(JSON.stringify({ error: message }), {
-            status: 500,
+            status: error instanceof ClaimsBackendInputError ? 400 : 500,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         }
+      }
+
+      // --- Gmail receipt import ---------------------------------------------
+
+      // POST /gmail/connect - begin linking a Gmail account. Same pattern as
+      // /xero/connect: header-authed, CSRF state in an HttpOnly cookie.
+      if (path === '/gmail/connect' && request.method === 'POST') {
+        if (!(await gmail.isConfigured(env))) {
+          return jsonResponse(
+            { error: 'Gmail import is not set up yet. Add the Google client ID and secret in the Gmail panel first.' },
+            corsHeaders,
+            503
+          );
+        }
+        const state = crypto.randomUUID();
+        const secure = url.protocol === 'https:' ? '; Secure' : '';
+        return new Response(JSON.stringify({ authorizeUrl: await gmail.buildAuthorizeUrl(env, request.url, state) }), {
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store',
+            'Referrer-Policy': 'no-referrer',
+            'Set-Cookie': `gmail_oauth_state=${state}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600${secure}`,
+          },
+        });
+      }
+
+      // GET /gmail/callback - Google redirects here after consent.
+      if (path === '/gmail/callback' && request.method === 'GET') {
+        const noLeak = { ...corsHeaders, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' };
+        const oauthError = url.searchParams.get('error');
+        // Failures land back in the app with a short code the UI explains,
+        // rather than on a bare error page.
+        const backToApp = (query: string) =>
+          new Response(null, {
+            status: 302,
+            headers: {
+              ...noLeak,
+              Location: `${url.origin}/?${query}`,
+              'Set-Cookie': 'gmail_oauth_state=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0',
+            },
+          });
+        if (oauthError) {
+          return backToApp(`gmailError=${oauthError === 'access_denied' ? 'access_denied' : 'failed'}`);
+        }
+        const code = url.searchParams.get('code');
+        const state = url.searchParams.get('state');
+        const cookieState = parseCookie(request.headers.get('Cookie'), 'gmail_oauth_state');
+        if (!code || !state || !cookieState || state !== cookieState) {
+          return backToApp('gmailError=expired');
+        }
+        let email: string;
+        try {
+          email = await gmail.exchangeCode(env, request.url, code);
+        } catch (err) {
+          console.log(`gmail link failed: ${err instanceof Error ? err.message : String(err)}`);
+          return backToApp('gmailError=failed');
+        }
+        return backToApp(`gmail=${encodeURIComponent(email)}`);
+      }
+
+      // GET /gmail/status - linked accounts and their last scan
+      if (path === '/gmail/status' && request.method === 'GET') {
+        return jsonResponse(await gmail.getStatus(env, request.url), corsHeaders);
+      }
+
+      // PUT /gmail/client { clientId, clientSecret } - save the Google OAuth
+      // client from the app (ignored when the Worker secrets are set).
+      // DELETE /gmail/client - forget it.
+      if (path === '/gmail/client' && request.method === 'PUT') {
+        const body = (await request.json().catch(() => ({}))) as { clientId?: unknown; clientSecret?: unknown };
+        try {
+          await gmail.saveClient(
+            env,
+            typeof body.clientId === 'string' ? body.clientId : '',
+            typeof body.clientSecret === 'string' ? body.clientSecret : ''
+          );
+        } catch (err) {
+          if (err instanceof gmail.GmailClientInputError) {
+            return jsonResponse({ error: err.message }, corsHeaders, 400);
+          }
+          throw err;
+        }
+        return jsonResponse({ success: true }, corsHeaders);
+      }
+      if (path === '/gmail/client' && request.method === 'DELETE') {
+        await gmail.clearClient(env);
+        return jsonResponse({ success: true }, corsHeaders);
+      }
+
+      // GET /ai/settings - which AI keys are set (never the keys themselves),
+      // the receipt-reading provider and the Claude model.
+      if (path === '/ai/settings' && request.method === 'GET') {
+        return jsonResponse(await ai.getSettingsStatus(env), corsHeaders);
+      }
+
+      // PUT /ai/settings { keys?: { anthropic?: string|null, ... },
+      // visionProvider?, claudeModel? } - null removes an app-saved key.
+      if (path === '/ai/settings' && request.method === 'PUT') {
+        const body = (await request.json().catch(() => ({}))) as ai.AiSettingsUpdate;
+        const keys = body.keys && typeof body.keys === 'object' ? body.keys : undefined;
+        try {
+          await ai.saveSettings(env, { keys, visionProvider: body.visionProvider, claudeModel: body.claudeModel });
+        } catch (err) {
+          if (err instanceof ai.AiSettingsInputError) {
+            return jsonResponse({ error: err.message }, corsHeaders, 400);
+          }
+          throw err;
+        }
+        return jsonResponse(await ai.getSettingsStatus(env), corsHeaders);
+      }
+
+      // POST /ai/match { claims: [...], receipts: [...] } - ask Claude to pair
+      // outstanding claims with unlinked receipts. Suggestions only; nothing
+      // is linked until the user accepts one.
+      if (path === '/ai/match' && request.method === 'POST') {
+        const aiEnv = await ai.withAiSettings(env);
+        if (!aiEnv.ANTHROPIC_API_KEY) {
+          return jsonResponse({ error: 'Add a Claude API key under Settings > AI first.' }, corsHeaders, 400);
+        }
+        const body = (await request.json().catch(() => ({}))) as { claims?: unknown; receipts?: unknown };
+        const claims = parseMatchClaims(body.claims);
+        const receipts = parseMatchReceipts(body.receipts);
+        if (claims.length === 0 || receipts.length === 0) {
+          return jsonResponse({ matches: [], model: null }, corsHeaders);
+        }
+        try {
+          return jsonResponse(await ai.suggestMatches(aiEnv, claims, receipts), corsHeaders);
+        } catch (err) {
+          console.log(`ai match failed: ${cleanError(err)}`);
+          return jsonResponse({ error: `Claude couldn't suggest matches: ${cleanError(err)}` }, corsHeaders, 502);
+        }
+      }
+
+      // POST /gmail/disconnect { email } - unlink one account
+      if (path === '/gmail/disconnect' && request.method === 'POST') {
+        const body = (await request.json().catch(() => ({}))) as { email?: unknown };
+        const email = typeof body.email === 'string' ? body.email.toLowerCase() : '';
+        if (!email) return jsonResponse({ error: 'email is required' }, corsHeaders, 400);
+        const removed = await gmail.removeAccount(env, email);
+        return jsonResponse({ success: removed }, corsHeaders, removed ? 200 : 404);
+      }
+
+      // POST /gmail/scan[?email=] - scan linked accounts now (the cron does
+      // the same on a schedule)
+      if (path === '/gmail/scan' && request.method === 'POST') {
+        const only = url.searchParams.get('email')?.toLowerCase() || undefined;
+        return jsonResponse(await gmail.scanAll(env, gmailImporter(env, ctx), only), corsHeaders);
       }
 
       // --- Xero integration ---------------------------------------------
@@ -2136,19 +2823,20 @@ export default {
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Failed to compile receipts PDF';
           return new Response(JSON.stringify({ error: message }), {
-            status: 502,
+            status: err instanceof ClaimsBackendInputError ? 400 : 502,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         }
       }
 
       // POST /xero/invoices/mark-claimed - after the draft bill and receipts
-      // have been reviewed, tag receipts as invoiced and flip linked YNAB TODOs.
+      // have been reviewed, tag receipts as invoiced and flip linked claim TODOs.
       if (path === '/xero/invoices/mark-claimed' && request.method === 'POST') {
         try {
           const body = (await request.json()) as {
             invoiceID?: string;
             lineItems?: PushLineItem[];
+            backend?: unknown;
           };
           const invoiceID = typeof body.invoiceID === 'string' ? body.invoiceID : '';
           const lineItems = parsePushLineItems(body.lineItems);
@@ -2158,26 +2846,32 @@ export default {
               headers: { ...corsHeaders, 'Content-Type': 'application/json' },
             });
           }
+          const backend = resolveMutationBackend(body.backend, lineItems);
 
           const claimedDate = singaporeToday();
-          const claimIds = Array.from(
-            new Set(
+          const claims = Array.from(
+            new Map(
               lineItems
-                .map((l) => l.ynabClaimId)
-                .filter((id): id is string => typeof id === 'string' && id.length > 0)
-            )
+                .filter((line): line is ClaimLine => Boolean(line.ynabClaimId))
+                .map((line) => [line.ynabClaimId, line])
+            ).values()
           );
-          const claimedYnab: Array<{ id: string; status: string; detail?: string }> = [];
-          for (const id of claimIds) {
-            const result = await markYnabClaimed(env, id, claimedDate);
-            claimedYnab.push({ id, ...result });
+          let claimedYnab: Array<{ id: string; status: string; detail?: string }>;
+          if (backend === 'howmuch') {
+            claimedYnab = await markHowMuchClaimed(env, claims, claimedDate);
+          } else {
+            claimedYnab = [];
+            for (const claim of claims) {
+              const result = await markYnabClaimed(env, claim.ynabClaimId, claimedDate, backend, claim.claimSource || null);
+              claimedYnab.push({ id: claim.ynabClaimId, ...result });
+            }
           }
 
-          const ynabIssues = claimedYnab.filter((item) => item.status !== 'claimed');
+          const ynabIssues = claimedYnab.filter((item) => item.status === 'failed');
           if (ynabIssues.length > 0) {
             return new Response(
               JSON.stringify({
-                error: 'YNAB update failed; receipts were not marked invoiced.',
+                error: `${backend === 'howmuch' ? 'HowMuch' : 'YNAB'} update failed; receipts were not marked invoiced.`,
                 claimedDate,
                 taggedReceipts: [],
                 claimedYnab,
@@ -2197,6 +2891,7 @@ export default {
                 xeroPendingInvoiceId: undefined,
                 xeroPendingInvoiceNumber: undefined,
                 xeroPendingAt: undefined,
+                xeroPendingClaimsBackend: undefined,
               });
               taggedReceipts.push({ key, status: 'tagged' });
             } catch (err) {
@@ -2205,13 +2900,13 @@ export default {
           }
 
           return new Response(
-            JSON.stringify({ success: true, claimedDate, taggedReceipts, claimedYnab }),
+            JSON.stringify({ success: true, backend, claimedDate, taggedReceipts, claimedYnab }),
             { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
           );
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Failed to mark claims as claimed';
           return new Response(JSON.stringify({ error: message }), {
-            status: 502,
+            status: err instanceof ClaimsBackendInputError ? 400 : 502,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         }
@@ -2226,6 +2921,7 @@ export default {
             reference?: string;
             lineItems?: PushLineItem[];
             receiptPdf?: unknown;
+            backend?: unknown;
           };
           const lineItems = parsePushLineItems(body.lineItems).map((l) => ({
             ...l,
@@ -2237,8 +2933,11 @@ export default {
               headers: { ...corsHeaders, 'Content-Type': 'application/json' },
             });
           }
+          const backend = resolveMutationBackend(body.backend, lineItems);
 
           const bucketLabel = body.bucket === 'gst' ? 'GST' : body.bucket === 'transport' ? 'Transport' : 'Non-GST';
+          // Fallback bill name is the bucket only — avoid a trailing "claims",
+          // which reads like already reimbursed. HowMuch/YNAB stay TODO until /mark-claimed.
           // Bill date in Singapore time — toISOString() is UTC and would backdate
           // the bill by a day when pushing between 00:00 and 07:59 SGT.
           const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Singapore' }).format(new Date());
@@ -2249,13 +2948,13 @@ export default {
           const lineKeys = lineItems
             .map((l) => `${l.receiptKey}:${Number(l.amount).toFixed(2)}:${l.accountCode}:${l.taxType}:${l.description}`)
             .sort();
-          const idem = await xero.idempotencyKey(['claim-bill', body.bucket || '', body.reference || '', ...lineKeys]);
+          const idem = await xero.idempotencyKey(['claim-bill', backend, body.bucket || '', body.reference || '', ...lineKeys]);
 
           const bill = await xero.createBill(env, {
             contactName: 'Soon Yin Jie',
             date: today,
             dueDate,
-            reference: body.reference || `${bucketLabel} claims`,
+            reference: body.reference || bucketLabel,
             idempotencyKey: idem,
             lineItems: lineItems.map((l) => ({
               description: l.description,
@@ -2308,6 +3007,7 @@ export default {
                 xeroPendingInvoiceId: bill.invoiceID,
                 xeroPendingInvoiceNumber: bill.invoiceNumber,
                 xeroPendingAt: pendingAt,
+                xeroPendingClaimsBackend: backend,
               });
             } catch (err) {
               pendingReceiptFailures.push(`${key}: ${cleanError(err)}`);
@@ -2323,6 +3023,7 @@ export default {
             JSON.stringify({
               invoiceID: bill.invoiceID,
               invoiceNumber: bill.invoiceNumber,
+              backend,
               url: bill.url,
               allAttached,
               attachments,
@@ -2333,7 +3034,7 @@ export default {
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Failed to push invoice to Xero';
           return new Response(JSON.stringify({ error: message }), {
-            status: 502,
+            status: err instanceof ClaimsBackendInputError ? 400 : 502,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         }
@@ -2361,7 +3062,9 @@ export default {
         }
       );
       const headers = new Headers(assetResponse.headers);
-      headers.set('Cache-Control', 'no-store');
+      // Revalidate on every visit (ETag → 304) instead of re-downloading the
+      // whole module graph; a deploy still shows up immediately.
+      headers.set('Cache-Control', 'no-cache');
       return new Response(assetResponse.body, {
         status: assetResponse.status,
         statusText: assetResponse.statusText,
@@ -2374,7 +3077,7 @@ export default {
       }
       const message = error instanceof Error ? error.message : 'Unknown error';
       return new Response(JSON.stringify({ error: message }), {
-        status: 500,
+        status: error instanceof ClaimsBackendInputError ? 400 : 500,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }

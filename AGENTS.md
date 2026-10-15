@@ -1,6 +1,6 @@
 # Agent Instructions
 
-Guidelines for AI agents working on this codebase.
+Guidelines for AI agents working on This Claimer (repo formerly `ynab-claimer`).
 
 ## Sensitive Data
 
@@ -14,6 +14,7 @@ The `.env` file contains secrets. When writing documentation or examples, always
 ## Project Structure
 
 - `upload-app/` - Cloudflare Worker for receipt uploads
+- `docs/` - Human docs (setup, usage, worker API, WebMCP); README.md stays short and links here
 - `scripts/` - Local automation scripts for Volopay and Gmail receipt export
 - `.claude/skills/claims/SKILL.md` - Claude Code skill for processing claims
 - `.claude/skills/ride-gmail-receipts/SKILL.md` - Skill for exporting Grab and Gojek ride receipts from Gmail using `gog`
@@ -21,6 +22,8 @@ The `.env` file contains secrets. When writing documentation or examples, always
 - `.agents/skills/ride-gmail-receipts/SKILL.md` - Agent mirror of the ride Gmail receipt export skill
 - `.agents/skills/claim-invoices/SKILL.md` - Agent mirror of the claim-invoices skill
 - `upload-app/worker/xero.ts` - Xero OAuth + bill creation/attachment for the Invoices tab
+- `upload-app/worker/gmail.ts` - Gmail OAuth (multiple accounts) + scheduled receipt import
+- `upload-app/worker/ai.ts` - AI keys/settings stored from the app, Claude receipt reading and Claude-assisted matching
 - `.env` - Local config (gitignored)
 - `.env.example` - Template with placeholders (safe to commit)
 
@@ -32,6 +35,7 @@ Local config lives in `.env` (gitignored); `.env.example` is the committed templ
 - `YNAB_BUDGET_ID` — from the YNAB URL when viewing the budget
 - `GEMINI_API_KEY` — for receipt amount tagging
 - `GEMINI_MODEL` — optional override (worker default: `gemini-3-flash-preview`)
+- `ANTHROPIC_API_KEY` — optional, for Claude receipt reading and Claude-assisted matching (can be set under Settings > AI in the app instead)
 - `R2_WORKER_URL` — deployed receipt-upload worker URL
 - `R2_PASSWORD` — receipt worker auth token (must match the worker's `AUTH_PASSWORD` secret)
 - `VOLOPAY_URL` — your company's Volopay subdomain
@@ -122,11 +126,37 @@ the user's go-ahead.
 ### Vision Tagging (Amounts + GST Detection)
 
 Receipt vision tagging (amount/date/vendor/purpose extraction and GST
-detection) is provider-switched: MiniMax coding-plan VLM (`MINIMAX_API_KEY`
-secret, an `sk-cp-` key; calls are covered by the coding-plan subscription) is
-the primary for image receipts; Gemini (`GEMINI_API_KEY`) is the backup and
-always handles PDF/HEIC. Toggle via the `VISION_PROVIDER` var in `wrangler.toml`
-(`minimax` | `gemini`).
+detection) is provider-switched across three providers:
+
+- MiniMax coding-plan VLM (`MINIMAX_API_KEY`, an `sk-cp-` key; covered by the
+  coding-plan subscription): image receipts only.
+- Claude via the Anthropic API (`ANTHROPIC_API_KEY`, `sk-ant-`): images and
+  PDFs, through `@anthropic-ai/sdk` with structured JSON output. Model from
+  `CLAUDE_MODEL` (default `claude-opus-5-5`).
+- Gemini (`GEMINI_API_KEY`): everything, including HEIC.
+
+`VISION_PROVIDER` in `wrangler.toml` (`minimax` | `anthropic` | `gemini`) picks
+which is tried first; every other provider with a key that can read the file
+type is a fallback, in the order MiniMax, Claude, Gemini.
+
+### AI settings (keys in the app)
+
+The **AI** section of the Settings dialog (gear in the header; `src/ai.js`,
+`worker/ai.ts`) holds the provider keys. Keys pasted there are checked against the provider (Anthropic
+and Gemini), stored in KV (`APP_SETTINGS` binding, key `ai_settings`, same
+namespace as Xero/Gmail) and never returned to the browser; the UI only sees
+whether a key is set and its last four characters. A key saved in the app wins
+over the matching Worker secret, and removing it falls back to the secret. The
+section also sets the first receipt-reading provider and the Claude model, which
+override `VISION_PROVIDER` / `CLAUDE_MODEL`. Routes: `GET|PUT /ai/settings`.
+
+With a Claude key set, **Find matches** runs the exact rules and then sends the
+outstanding claims and unlinked receipts the rules didn't clearly pair to
+Claude (`POST /ai/match`, capped at 150 claims / 250 receipts). Claude's pairs
+show in Match review with a "Claude" chip and its reason. Nothing is linked
+until the user accepts a suggestion; Claude's pick replaces an ambiguous rule
+suggestion for the same claim but never a clear one. Without a Claude key, or
+if the call fails, Find matches shows the exact matches only.
 
 The GST checkbox on each invoice line defaults from the AI verdict stored on
 the receipt (`taggedGstShown` / `taggedGstAmount` / `taggedGstSource` metadata;
@@ -139,6 +169,36 @@ the checkbox remains the manual override):
 - The verdict is strictly "an explicit GST line is printed on the receipt" —
   never inferred from vendor or total. Note a USD receipt can legitimately show
   SG GST (overseas-vendor-registration suppliers like Fireworks AI).
+
+## Gmail Receipt Import (automatic)
+
+The worker can link one or more Gmail accounts (read-only) and import receipts
+into R2 on its own: a cron (`[triggers]` in `wrangler.toml`, every four hours)
+plus a **Scan now** button in the Gmail import section of the Settings dialog
+(gear icon in the header, `upload-app/src/settings.js`). Setup, linked accounts
+and reconnects live there too; the Claims page only shows a quiet "Gmail ·
+checked" line on the receipts column and a dismissible notice when an account
+needs reconnecting. The gear shows a dot whenever an account needs attention.
+
+- PDF/image attachments on emails matching `DEFAULT_RECEIPT_QUERY` in
+  `worker/gmail.ts` (override with the `GMAIL_RECEIPT_QUERY` var). Inline
+  images and images under 30 KB are ignored as logos.
+- Body-only Grab/Gojek ride receipts are printed to PDF through Cloudflare
+  Browser Rendering when the `CF_BROWSER_RENDERING_TOKEN` secret is set
+  (same rules as `scripts/export-ride-receipt.ts`; GrabFood excluded).
+- Imported receipts carry `source=gmail`, `gmailAccount`, `gmailMessageId`,
+  `gmailSubject` metadata and are tagged like manual uploads. Each Gmail
+  message is imported at most once (seen ids kept per account in KV).
+- Nothing is written to Gmail. First scan looks back
+  `GMAIL_INITIAL_LOOKBACK_DAYS` (default 14).
+- Setup: Google Cloud project with the Gmail API enabled; OAuth client of type
+  Web application with redirect URI `https://receipts.yourdomain.com/gmail/callback`;
+  consent screen published to "In production" (in Testing, refresh tokens
+  expire after 7 days). The client ID/secret can be pasted into the Gmail
+  panel (stored in KV via `PUT /gmail/client`, never returned by the API), or
+  set as Worker secrets `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`, which win.
+- Routes: `POST /gmail/connect`, `GET /gmail/callback`, `GET /gmail/status`,
+  `POST /gmail/disconnect`, `POST /gmail/scan`, `PUT|DELETE /gmail/client`.
 
 ## Gmail Receipt Export
 
@@ -176,6 +236,14 @@ Receipt amount tagging uses MiniMax coding-plan VLM for image receipts when
 - For USD receipts, store SGD approximations:
   - day-rate conversion
   - day-rate conversion plus 3.25%
+
+### Load-time diagnostics
+
+`GET /list` and `GET /ynab/todos` return a `Server-Timing` header (`r2-list`,
+`r2-metadata`, `claims-upstream`, in ms). In the browser, Network → pick the
+request → Timing shows where a slow page load spent its time; with curl use
+`-D -` to print the headers. `r2-metadata` says `inline` when R2 returned
+receipt metadata in the listing, or how many `head()` fallbacks were needed.
 
 ### Common Pitfalls
 

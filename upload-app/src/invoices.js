@@ -7,7 +7,7 @@ import {
   escapeHtml,
   formatCurrencyAmount,
 } from './lib/core.js';
-import { receiptsData, claimsData, claimsLoadErrorMessage } from './lib/state.js';
+import { receiptsData, claimsData, claimsDataBackend, claimsLoadErrorMessage } from './lib/state.js';
 import {
   getLinkedClaimIds,
   getReceiptMatchDate,
@@ -15,14 +15,14 @@ import {
   getReceiptDisplayName,
   getComparableReceiptAmounts,
 } from './lib/match.js';
-import { openPreview } from './lib/preview.js';
-import { clearSelection, loadReceipts, loadYnabTodos } from './claims.js';
+import { openPreview } from './lib/preview.js?v=20260914-preview-review';
+import { clearSelection, getClaimsBackend, loadReceipts, loadYnabTodos } from './claims.js?v=20261015-ai';
 
 const claimsView = document.getElementById('claimsView');
 const navClaims = document.getElementById('navClaims');
 const navInvoices = document.getElementById('navInvoices');
 const invoicesView = document.getElementById('invoicesView');
-const xeroStatusEl = document.getElementById('xeroStatus');
+const xeroStatusEls = document.querySelectorAll('[data-xero-status]');
 const invoicesRefreshBtn = document.getElementById('invoicesRefreshBtn');
 const detectGstBtn = document.getElementById('detectGstBtn');
 const invoicesSectionsEl = document.getElementById('invoicesSections');
@@ -31,11 +31,12 @@ const invoicesLoadingEl = document.getElementById('invoicesLoading');
 
 const INVOICE_BUCKETS = ['gst', 'nongst', 'transport'];
 const BUCKET_HEADING = {
-  gst: 'GST claims — DRAFT bill',
-  nongst: 'Non-GST claims — DRAFT bill',
-  transport: 'Transport claims — DRAFT bill',
+  gst: 'GST',
+  nongst: 'Non-GST',
+  transport: 'Transport',
 };
 const BUCKET_LABEL = { gst: 'GST', nongst: 'Non-GST', transport: 'Transport' };
+const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const INVOICE_SECTIONS_KEY = 'claim_manager_invoice_sections';
 const INVOICE_SORTS_KEY = 'claim_manager_invoice_sorts';
 const INVOICE_LAST_PUSH_KEY = 'claim_manager_invoice_last_push';
@@ -88,11 +89,15 @@ const ACCOUNT_HINTS = [
   { code: '467', re: /\b(phone|mobile|telco|singtel|starhub|\bm1\b|internet|broadband|data plan|\bsim\b)\b/i },
   { code: '463', re: /\b(subscription|software|saas|\bapp\b|\bai\b|\bapi\b|github|openai|chatgpt|claude|anthropic|lovable|figma|notion|adobe|cloud|domain|hosting)\b/i },
 ];
-const INVOICE_EMPTY_TEXT = 'No ready-to-claim items. Mark receipts ready or link them to YNAB claims first.';
+const INVOICE_EMPTY_TEXT = 'No ready-to-claim items. Mark receipts ready or link them to claims first.';
 const INVOICE_CLAIMS_UNAVAILABLE_TEXT = 'Claims unavailable. Refresh claims before creating Xero bills.';
 
 function invoiceAccounts() {
-  return xeroAccounts && xeroAccounts.length ? xeroAccounts : FALLBACK_ACCOUNTS;
+  const accounts = xeroAccounts && xeroAccounts.length ? xeroAccounts : FALLBACK_ACCOUNTS;
+  return [...accounts].sort((a, b) => (
+    a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+    || a.code.localeCompare(b.code, undefined, { numeric: true })
+  ));
 }
 
 function invoiceTaxTypes() {
@@ -153,10 +158,6 @@ function normaliseLineForSection(line) {
 }
 
 function setLineSection(line, section) {
-  if (getLineSection(line) !== section && isLineReviewed(line)) {
-    line.reviewed = false;
-    saveInvoiceEdit(line.id, { reviewed: false });
-  }
   line.section = section;
   normaliseLineForSection(line);
   saveInvoiceEdit(line.id, {
@@ -165,6 +166,7 @@ function setLineSection(line, section) {
     taxType: line.taxType,
     accountCode: line.accountCode,
   });
+  reaffirmLineReviewAfterEdit(line);
 }
 
 function defaultForeignCurrencyRemark(receipt) {
@@ -224,8 +226,16 @@ function setInvoicesLoading(loading) {
 }
 
 function updateInvoicesVisibility() {
-  if (invoicesLoadingEl) invoicesLoadingEl.hidden = !invoicesLoading;
-  if (invoicesSectionsEl) invoicesSectionsEl.hidden = invoicesLoading;
+  // Keep rendered sections on screen (dimmed) while refreshing; the loading
+  // box only replaces the content when there is nothing to show yet.
+  const hasRenderedSections = Boolean(invoicesSectionsEl?.querySelector('.invoice-section'));
+  const showLoadingBox = invoicesLoading && !hasRenderedSections;
+  if (invoicesLoadingEl) invoicesLoadingEl.hidden = !showLoadingBox;
+  if (invoicesSectionsEl) {
+    invoicesSectionsEl.hidden = showLoadingBox;
+    if (invoicesLoading && hasRenderedSections) invoicesSectionsEl.setAttribute('aria-busy', 'true');
+    else invoicesSectionsEl.removeAttribute('aria-busy');
+  }
   if (invoicesEmpty) invoicesEmpty.hidden = invoicesLoading || invoiceLines.length > 0;
 }
 
@@ -252,7 +262,12 @@ function writeInvoiceEdits(store) {
 
 function saveInvoiceEdit(lineId, patch) {
   const store = loadInvoiceEdits();
-  store[lineId] = { ...(store[lineId] || {}), ...patch };
+  const line = invoiceLines.find((item) => item.id === lineId);
+  store[lineId] = {
+    ...(store[lineId] || {}),
+    ...(line?.claimsBackend ? { claimsBackend: line.claimsBackend } : {}),
+    ...patch,
+  };
   writeInvoiceEdits(store);
 }
 
@@ -294,6 +309,18 @@ function loadPushHistory() {
   }
 }
 
+function legacyLineItemKey(item) {
+  return `${item.receiptKey || ''}::${item.ynabClaimId || ''}`;
+}
+
+function pushHistoryEntryForItem(item) {
+  const byLine = loadPushHistory().byLine || {};
+  const current = byLine[lineItemKey(item)];
+  if (current) return current;
+  const backend = item?.claimsBackend === 'howmuch' ? 'howmuch' : 'ynab';
+  return backend === 'ynab' ? byLine[legacyLineItemKey(item)] : undefined;
+}
+
 function writePushHistory(history) {
   try {
     localStorage.setItem(INVOICE_PUSH_HISTORY_KEY, JSON.stringify(history));
@@ -311,6 +338,7 @@ function rememberPushedInvoice(data, payload) {
     byLine[lineItemKey(item)] = {
       invoiceID: data.invoiceID,
       invoiceNumber: data.invoiceNumber || '',
+      claimsBackend: item.claimsBackend || payload.backend || '',
       bucket: payload.bucket || '',
       reference: payload.reference || '',
       savedAt,
@@ -320,11 +348,16 @@ function rememberPushedInvoice(data, payload) {
 }
 
 function rememberedInvoiceIDForItem(item) {
-  if (typeof item?.xeroPendingInvoiceId === 'string' && item.xeroPendingInvoiceId) {
-    return item.xeroPendingInvoiceId;
-  }
-  const entry = loadPushHistory().byLine?.[lineItemKey(item)];
+  // Only a push remembered in this browser counts. Receipt xeroPending*
+  // stamps are leftover portal metadata and are not proof a bill exists.
+  const entry = pushHistoryEntryForItem(item);
   return typeof entry?.invoiceID === 'string' ? entry.invoiceID : '';
+}
+
+function rememberedClaimsBackendForItem(item) {
+  if (item?.claimsBackend === 'howmuch' || item?.claimsBackend === 'ynab') return item.claimsBackend;
+  const backend = pushHistoryEntryForItem(item)?.claimsBackend;
+  return backend === 'ynab' ? 'ynab' : backend === 'howmuch' ? 'howmuch' : getClaimsBackend();
 }
 
 function lineReviewSnapshot(line) {
@@ -358,16 +391,26 @@ function snapshotsMatch(a, b) {
   return JSON.stringify(a || null) === JSON.stringify(b || null);
 }
 
-// Re-apply saved manual edits onto freshly-built lines, and prune saved edits
-// for lines that no longer exist (e.g. once a receipt has been invoiced).
+// Re-apply saved manual edits onto freshly-built lines. Keep edits for lines
+// outside the current backend/load snapshot so asynchronous refreshes cannot
+// discard review state from another ledger.
 function applySavedInvoiceEdits(lines) {
   const store = loadInvoiceEdits();
-  const liveIds = new Set(lines.map((l) => l.id));
   lines.forEach((line) => {
+    const legacyId = legacyLineItemKey(line);
+    const legacySaved = line.claimsBackend === 'ynab' ? store[legacyId] : undefined;
+    if (!store[line.id] && legacySaved) {
+      store[line.id] = { ...legacySaved, claimsBackend: 'ynab' };
+      delete store[legacyId];
+    }
     const saved = store[line.id];
     const sourceSnapshot = lineSourceSnapshot(line);
     line.sourceSnapshot = sourceSnapshot;
-    if (saved) Object.assign(line, saved);
+    if (saved) {
+      const { claimsBackend: _savedBackend, ...savedEdits } = saved;
+      Object.assign(line, savedEdits);
+    }
+    if (saved && line.claimsBackend) store[line.id].claimsBackend = line.claimsBackend;
     const before = JSON.stringify({
       section: line.section,
       gstShown: line.gstShown,
@@ -407,15 +450,11 @@ function applySavedInvoiceEdits(lines) {
       Object.assign(line, store[line.id]);
     }
   });
-  const pruned = {};
-  Object.keys(store).forEach((id) => {
-    if (liveIds.has(id)) pruned[id] = store[id];
-  });
-  writeInvoiceEdits(pruned);
+  writeInvoiceEdits(store);
 }
 
 function buildInvoiceLines() {
-  if (claimsLoadErrorMessage) {
+  if (claimsLoadErrorMessage || claimsDataBackend !== getClaimsBackend()) {
     invoiceLines = [];
     return;
   }
@@ -428,6 +467,8 @@ function buildInvoiceLines() {
     getLinkedClaimIds(receipt).forEach((claimId) => {
       const claim = claimsById.get(claimId) || null;
       const isReadyOnly = isReadyOnlyClaimId(claimId);
+      const linkedBackend = receipt.linkedClaimsBackend || 'ynab';
+      if (!isReadyOnly && linkedBackend !== claimsDataBackend) return;
       if (!claim && !isReadyOnly) return;
       const matchDate = getReceiptMatchDate(receipt).date;
       const date = (claim && claim.date) || (matchDate ? matchDate.toISOString().slice(0, 10) : '');
@@ -448,11 +489,16 @@ function buildInvoiceLines() {
         if (pref) amount = pref.value;
       }
 
+      const claimsBackend = linkedBackend === 'howmuch' ? 'howmuch' : 'ynab';
       lines.push({
-        id: `${receipt.key}::${claimId}`,
+        id: `${claimsBackend}::${receipt.key}::${claimId}`,
         receiptKey: receipt.key,
         receiptName: getReceiptDisplayName(receipt),
         ynabClaimId: isReadyOnly ? null : claimId,
+        claimSource: claim?.source || null,
+        claimDescription: claim?.description || null,
+        claimsBackend,
+        sourceUrl: claimsBackend === 'howmuch' ? (claim?.sourceUrl || '') : '',
         xeroPendingInvoiceId: receipt.xeroPendingInvoiceId || '',
         xeroPendingInvoiceNumber: receipt.xeroPendingInvoiceNumber || '',
         // Default excluded when there's no usable amount yet, so we never push $0.00.
@@ -497,6 +543,20 @@ function taxTypeLabel(taxType, taxTypes = invoiceTaxTypes()) {
   return match ? `${match.taxType} - ${match.name}` : taxType;
 }
 
+// Short names for the table cell; the full Xero name stays in the tooltip and
+// the dropdown.
+const TAX_TYPE_SHORT_NAME = {
+  INPUTY24: 'Standard-rated',
+  NRINPUT: 'Non-GST supplier',
+  OPINPUT: 'Out of scope',
+};
+
+function taxTypeCellHtml(taxType, taxTypes = invoiceTaxTypes()) {
+  const short = TAX_TYPE_SHORT_NAME[taxType] || '';
+  const full = taxTypeLabel(taxType, taxTypes);
+  return `<span class="inv-cell-text" title="${escapeHtml(full)}"><span class="inv-tax-code">${escapeHtml(taxType)}</span>${short ? `<span class="inv-tax-name">${escapeHtml(short)}</span>` : ''}</span>`;
+}
+
 function isLineReviewed(line) {
   return line.reviewed === true;
 }
@@ -514,7 +574,7 @@ function bucketReviewState(bucket) {
 function invoicePushNote(bucket) {
   const { pushable, reviewedCount, allReviewed } = bucketReviewState(bucket);
   if (pushable.length === 0) return '';
-  if (allReviewed) return 'Creates a DRAFT bill in Xero and attaches the receipts.';
+  if (allReviewed) return 'HowMuch/YNAB stay TODO until you mark checked lines claimed.';
   return `Review every line before pushing (${reviewedCount}/${pushable.length} reviewed).`;
 }
 
@@ -526,6 +586,42 @@ function invoiceSectionMeta(bucket, lines, total) {
     return `${pushable.length} bill lines · ${amount} · ${reviewedCount}/${pushable.length} reviewed`;
   }
   return `${lines.length} items · ${pushable.length} will push · ${amount} · ${reviewedCount}/${pushable.length} reviewed`;
+}
+
+function invoicePeriodLabel(lines) {
+  const dates = lines
+    .map((line) => String(line?.date || ''))
+    .filter((date) => /^\d{4}-\d{2}/.test(date))
+    .sort();
+  if (!dates.length) return '';
+  const start = dates[0];
+  const end = dates[dates.length - 1];
+  const monthName = (iso) => MONTH_SHORT[Number(iso.slice(5, 7)) - 1] || iso.slice(5, 7);
+  const startYear = start.slice(0, 4);
+  const endYear = end.slice(0, 4);
+  if (startYear === endYear && start.slice(5, 7) === end.slice(5, 7)) {
+    return `${monthName(start)}-${monthName(end)} ${startYear}`;
+  }
+  if (startYear === endYear) return `${monthName(start)}-${monthName(end)} ${startYear}`;
+  return `${monthName(start)} ${startYear}-${monthName(end)} ${endYear}`;
+}
+
+function defaultDraftReference(bucket, lines = []) {
+  const period = invoicePeriodLabel(lines);
+  const label = BUCKET_LABEL[bucket];
+  return period ? `${label} - YJ ${period}` : label;
+}
+
+function invoiceSectionStatusHtml() {
+  return 'Payee <strong>Soon Yin Jie</strong> · amounts are tax-inclusive SGD';
+}
+
+function hasLeftoverDraftStamp(line) {
+  return Boolean(line?.xeroPendingInvoiceId || line?.xeroPendingInvoiceNumber);
+}
+
+function leftoverDraftStampKeys(lines) {
+  return [...new Set(lines.filter(hasLeftoverDraftStamp).map((line) => line.receiptKey).filter(Boolean))];
 }
 
 function setLineReviewed(line, reviewed, btn) {
@@ -550,29 +646,57 @@ function setLineReviewed(line, reviewed, btn) {
     row.classList.toggle('inv-row-reviewed', reviewed);
     if (reviewed) {
       row.classList.remove('inv-row-stale');
-      row.querySelector('.inv-review-stale')?.remove();
+      const note = row.nextElementSibling;
+      if (note?.classList.contains('inv-row-note')) note.remove();
     }
   }
   updateSectionHeaders();
 }
 
-function invalidateLineReviewAfterEdit(line, contextEl) {
+// The user just changed this line by hand, so it is still reviewed: refresh the
+// stored snapshot so the reload-time "data changed underneath you" check keeps
+// matching. Only source data changing on its own should untick a line.
+function reaffirmLineReviewAfterEdit(line, contextEl) {
   if (!isLineReviewed(line)) return;
-  line.reviewInvalidated = true;
   const tr = contextEl?.closest?.('tr[data-id]');
   const btn = tr?.querySelector('.inv-review-btn');
-  setLineReviewed(line, false, btn);
-  line.reviewInvalidated = true;
-  saveInvoiceEdit(line.id, { reviewInvalidated: true });
-  if (!tr) return;
-  tr.classList.add('inv-row-stale');
-  const reviewedCell = tr.querySelector('.col-reviewed');
-  if (reviewedCell && !reviewedCell.querySelector('.inv-review-stale')) {
-    const notice = document.createElement('p');
-    notice.className = 'inv-review-stale';
-    notice.textContent = 'Edited — open the receipt, then mark reviewed again.';
-    reviewedCell.appendChild(notice);
-  }
+  setLineReviewed(line, true, btn);
+}
+
+function renderInvoiceStaleNoteRow() {
+  return `
+    <tr class="inv-row-note">
+      <td colspan="8">
+        <span class="inv-review-stale">Receipt or claim data changed since this line was reviewed — check it and tick again.</span>
+      </td>
+    </tr>`;
+}
+
+function invoiceMemoHtml(line) {
+  return escapeHtml(line.description || '—');
+}
+
+function invoiceRemarkHtml(line) {
+  return `<span class="inv-detail-label">Remark:</span> ${escapeHtml(line.remark || '—')}`;
+}
+
+function invoiceMemoRemarkHtml(line) {
+  return `
+    <div class="inv-description-stack">
+      <div class="inv-cell-editable inv-description-memo" data-field="description" title="Double-click memo to edit">${invoiceMemoHtml(line)}</div>
+      <div class="inv-cell-editable inv-description-remark" data-field="remark" title="Double-click remark to edit">${invoiceRemarkHtml(line)}</div>
+    </div>`;
+}
+
+function invoiceSourceLabel(line) {
+  if (!line.ynabClaimId) return 'Receipt only';
+  return line.claimsBackend === 'howmuch' ? 'HowMuch' : 'YNAB';
+}
+
+function invoiceSourceHtml(line) {
+  const label = invoiceSourceLabel(line);
+  if (!line.sourceUrl) return `<span class="inv-source-label">${label}</span>`;
+  return `<a class="inv-source-label inv-source-link" href="${escapeHtml(line.sourceUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${label} transaction">${label}</a>`;
 }
 
 function renderInvoiceLineRow(line, accounts) {
@@ -581,28 +705,28 @@ function renderInvoiceLineRow(line, accounts) {
   const invalidated = line.reviewInvalidated === true;
   return `
     <tr data-id="${escapeHtml(line.id)}" class="${reviewed ? 'inv-row-reviewed' : ''}${invalidated ? ' inv-row-stale' : ''}">
-      <td class="col-reviewed" data-label="Reviewed">
-        <button type="button" class="inv-review-btn${reviewed ? ' is-reviewed' : ''}"
-            aria-pressed="${reviewed ? 'true' : 'false'}"
-            aria-label="${reviewed ? 'Marked reviewed — tap to unmark' : 'Mark line as reviewed after checking receipt'}">
-          <span class="inv-review-check" aria-hidden="true">✓</span>
-        </button>
-        ${invalidated ? '<p class="inv-review-stale">Receipt data changed — review again before pushing.</p>' : ''}
-      </td>
-      <td class="inv-cell-editable" data-label="Date" data-field="date" data-input="text" title="Tap to edit"><span class="inv-cell-text">${escapeHtml(line.date || '—')}</span></td>
-      <td class="inv-cell-editable" data-label="Description" data-field="description" data-input="text" title="Tap to edit"><span class="inv-cell-text">${escapeHtml(line.description || '—')}</span></td>
-      <td class="inv-cell-editable" data-label="Account" data-field="accountCode" data-input="select" title="Tap to edit"><span class="inv-cell-text">${escapeHtml(accountLabel(line.accountCode, accounts))}</span></td>
-      <td class="inv-cell-editable" data-label="Type" data-field="section" data-input="type" title="Tap to edit"><span class="inv-cell-text">${escapeHtml(BUCKET_LABEL[section])}</span></td>
-      <td class="inv-cell-editable" data-label="Remark" data-field="remark" data-input="text" title="Tap to edit"><span class="inv-cell-text">${escapeHtml(line.remark || '—')}</span></td>
-      <td class="inv-cell-editable" data-label="Tax" data-field="taxType" data-input="select" title="Tap to edit"><span class="inv-cell-text">${escapeHtml(taxTypeLabel(deriveTaxType(line)))}</span></td>
-      <td class="num inv-cell-editable" data-label="Amount" data-field="amount" data-input="text" title="Tap to edit"><span class="inv-cell-text">S$${Number(line.amount).toFixed(2)}</span></td>
       <td class="col-actions" data-label="Actions">
-        <div class="inv-row-actions">
-          <button type="button" class="inv-preview-btn" title="Preview receipt" aria-label="Preview receipt">${EYE_ICON}</button>
-          <button type="button" class="inv-unlink-btn" title="Unlink from invoice list">Unlink</button>
+        <div class="inv-action-stack">
+          <div class="inv-row-actions">
+            <button type="button" class="inv-preview-btn" title="Preview receipt" aria-label="Preview receipt">${EYE_ICON}</button>
+            <button type="button" class="inv-review-btn${reviewed ? ' is-reviewed' : ''}"
+                aria-pressed="${reviewed ? 'true' : 'false'}"
+                aria-label="${reviewed ? 'Marked reviewed — tap to unmark' : 'Mark line as reviewed after checking receipt'}">
+              <span class="inv-review-check" aria-hidden="true">✓</span>
+            </button>
+            <button type="button" class="inv-unlink-btn" title="Unlink from invoice list" aria-label="Unlink from invoice list">⛔</button>
+          </div>
+          ${invoiceSourceHtml(line)}
         </div>
       </td>
-    </tr>`;
+      <td class="inv-cell-editable inv-cell-date" data-label="Date" data-field="date" data-input="text" title="Tap to edit"><span class="inv-cell-text">${escapeHtml(line.date || '—')}</span></td>
+      <td class="inv-cell-payee" data-label="Payee"><span class="inv-description-payee">${escapeHtml(line.payee || 'Unknown payee')}</span></td>
+      <td class="inv-cell-memo" data-label="Memo">${invoiceMemoRemarkHtml(line)}</td>
+      <td class="inv-cell-editable inv-cell-account" data-label="Account" data-field="accountCode" data-input="select" title="Tap to edit"><span class="inv-cell-text">${escapeHtml(accountLabel(line.accountCode, accounts))}</span></td>
+      <td class="inv-cell-editable inv-cell-type" data-label="Type" data-field="section" data-input="type" title="Tap to edit"><span class="inv-cell-text">${escapeHtml(BUCKET_LABEL[section])}</span></td>
+      <td class="inv-cell-editable inv-cell-tax" data-label="Tax" data-field="taxType" data-input="select" title="Tap to edit">${taxTypeCellHtml(deriveTaxType(line))}</td>
+      <td class="num inv-cell-editable inv-cell-amount" data-label="Amount" data-field="amount" data-input="text" title="Tap to edit"><span class="inv-cell-text">S$${Number(line.amount).toFixed(2)}</span></td>
+    </tr>${invalidated ? renderInvoiceStaleNoteRow() : ''}`;
 }
 
 function renderInvoiceSortOptions(bucket) {
@@ -619,12 +743,20 @@ function renderInvoiceSection(bucket, lines, accounts) {
   const { pushable, allReviewed } = bucketReviewState(bucket);
   const checkedCount = pushable.filter(isLineReviewed).length;
   const noteClass = pushable.length > 0 && !allReviewed ? 'invoice-doc-note invoice-doc-note-warn' : 'invoice-doc-note';
-  const actionsHtml = pushable.length > 0
-    ? `<div class="invoice-doc-actions">
-          <button type="button" class="btn-primary invoice-push-btn" data-bucket="${bucket}" ${allReviewed ? '' : 'disabled'}>Push to Xero (draft)</button>
+  const stampKeys = leftoverDraftStampKeys(lines);
+  const stampBtn = stampKeys.length
+    ? `<button type="button" class="btn-secondary invoice-clear-stamps-btn" data-bucket="${bucket}">Clear stale draft stamps</button>`
+    : '';
+  const pushActions = pushable.length > 0
+    ? `<button type="button" class="btn-primary invoice-push-btn" data-bucket="${bucket}" ${allReviewed ? '' : 'disabled'}>Push to Xero (draft)</button>
           <button type="button" class="btn-secondary invoice-download-btn" data-bucket="${bucket}">Download receipts PDF</button>
           <button type="button" class="btn-secondary invoice-claim-checked-btn" data-bucket="${bucket}" ${checkedCount ? '' : 'disabled'}>Mark checked as claimed</button>
-          <span class="${noteClass}">${escapeHtml(invoicePushNote(bucket))}</span>
+          <span class="${noteClass}">${escapeHtml(invoicePushNote(bucket))}</span>`
+    : '';
+  const actionsHtml = (pushActions || stampBtn)
+    ? `<div class="invoice-doc-actions">
+          ${pushActions}
+          ${stampBtn}
         </div>`
     : '';
   return `
@@ -634,7 +766,7 @@ function renderInvoiceSection(bucket, lines, accounts) {
         <span class="invoice-section-meta" aria-live="polite">${invoiceSectionMeta(bucket, lines, total)}</span>
       </summary>
       <div class="invoice-section-body">
-        <p class="invoice-doc-sub">Payee: <strong>Soon Yin Jie</strong> · tax-inclusive</p>
+        <p class="invoice-doc-sub">${invoiceSectionStatusHtml()}</p>
         <div class="invoice-section-tools">
           <label class="invoice-sort-label">
             <span>Sort</span>
@@ -647,23 +779,22 @@ function renderInvoiceSection(bucket, lines, accounts) {
           <table class="invoice-doc-table">
             <thead>
               <tr>
-                <th class="col-reviewed" aria-label="Reviewed">✓</th>
-                <th>Date</th>
-                <th>Description</th>
-                <th>Account</th>
-                <th>Type</th>
-                <th>Remark</th>
-                <th>Tax</th>
-                <th class="num">Amount</th>
                 <th class="col-actions">Actions</th>
+                <th class="col-date">Date</th>
+                <th class="col-payee">Payee</th>
+                <th class="col-memo">Memo</th>
+                <th class="col-account">Account</th>
+                <th class="col-type">Type</th>
+                <th class="col-tax">Tax</th>
+                <th class="col-amount num">Amount</th>
               </tr>
             </thead>
-            <tbody>${rowsHtml || `<tr><td colspan="9" class="empty-state">No ${BUCKET_LABEL[bucket]} items yet.</td></tr>`}</tbody>
+            <tbody>${rowsHtml || `<tr><td colspan="8" class="empty-state">No ${BUCKET_LABEL[bucket]} items yet.</td></tr>`}</tbody>
             <tfoot>
               <tr>
-                <td colspan="7" class="num"><strong>Total</strong></td>
-                <td class="num"><strong>S$${total.toFixed(2)}</strong></td>
                 <td></td>
+                <td colspan="6" class="num"><strong>Total</strong></td>
+                <td class="num"><strong>S$${total.toFixed(2)}</strong></td>
               </tr>
             </tfoot>
           </table>
@@ -687,11 +818,21 @@ function commitActiveInvoiceEdit() {
   closeActiveInvoiceEdit({ commit: true });
 }
 
-function attachTextEditCell(cell, line, field, { inputType = 'text', inputAttrs = '', format, parse }) {
+function attachTextEditCell(cell, line, field, {
+  inputType = 'text', inputAttrs = '', format, parse, displayHtml, editOnDoubleClick = false,
+}) {
   const renderDisplay = () => {
     cell.classList.remove('is-editing');
+    if (displayHtml) {
+      cell.innerHTML = displayHtml(line);
+      cell.onclick = editOnDoubleClick ? null : () => startEdit();
+      cell.ondblclick = editOnDoubleClick ? () => startEdit() : null;
+      return;
+    }
     const value = format ? format(line[field]) : (line[field] ?? '');
-    cell.innerHTML = `<span class="inv-cell-text">${escapeHtml(String(value ?? '—'))}</span>`;
+    const text = String(value ?? '').trim();
+    // An empty value still needs something to tap on.
+    cell.innerHTML = `<span class="inv-cell-text">${escapeHtml(text || '—')}</span>`;
     cell.onclick = () => startEdit();
   };
 
@@ -719,7 +860,7 @@ function attachTextEditCell(cell, line, field, { inputType = 'text', inputAttrs 
       const changed = parsed !== original;
       line[field] = parsed;
       saveInvoiceEdit(line.id, { [field]: parsed });
-      if (changed) invalidateLineReviewAfterEdit(line, cell);
+      if (changed) reaffirmLineReviewAfterEdit(line, cell);
       activeInvoiceEditCell = null;
       renderDisplay();
       updateSectionHeaders();
@@ -782,7 +923,7 @@ function attachAccountEditCell(cell, line, accounts) {
     const commit = () => {
       const nextCode = select.value;
       const prevSection = getLineSection(line);
-      if (nextCode !== originalCode) invalidateLineReviewAfterEdit(line, cell);
+      const changed = nextCode !== originalCode;
       line.accountCode = nextCode;
       saveInvoiceEdit(line.id, { accountCode: line.accountCode });
       activeInvoiceEditCell = null;
@@ -794,9 +935,11 @@ function attachAccountEditCell(cell, line, accounts) {
       if (line.section === 'transport' && !TRANSPORT_CODES.includes(line.accountCode)) {
         line.section = lineBucket(line);
         saveInvoiceEdit(line.id, { section: line.section, accountCode: line.accountCode });
+        reaffirmLineReviewAfterEdit(line);
         renderInvoiceEditor();
         return;
       }
+      if (changed) reaffirmLineReviewAfterEdit(line, cell);
       renderDisplay();
       if (getLineSection(line) !== prevSection) renderInvoiceEditor();
       else updateSectionHeaders();
@@ -827,7 +970,7 @@ function attachTaxTypeEditCell(cell, line) {
   const taxTypes = invoiceTaxTypes();
   const renderDisplay = () => {
     cell.classList.remove('is-editing');
-    cell.innerHTML = `<span class="inv-cell-text">${escapeHtml(taxTypeLabel(deriveTaxType(line), taxTypes))}</span>`;
+    cell.innerHTML = taxTypeCellHtml(deriveTaxType(line), taxTypes);
     cell.onclick = () => startEdit();
   };
 
@@ -846,7 +989,7 @@ function attachTaxTypeEditCell(cell, line) {
     const commit = () => {
       const next = select.value;
       const prevSection = getLineSection(line);
-      if (next !== current) invalidateLineReviewAfterEdit(line, cell);
+      const changed = next !== current;
       line.taxType = next;
       line.gstShown = next === 'INPUTY24';
       saveInvoiceEdit(line.id, { taxType: line.taxType, gstShown: line.gstShown });
@@ -855,6 +998,7 @@ function attachTaxTypeEditCell(cell, line) {
         line.section = lineBucket(line);
         saveInvoiceEdit(line.id, { section: line.section });
       }
+      if (changed) reaffirmLineReviewAfterEdit(line, cell);
       if (getLineSection(line) !== prevSection) renderInvoiceEditor();
       else renderDisplay();
       updateSectionHeaders();
@@ -902,7 +1046,6 @@ function attachTypeEditCell(cell, line) {
     select.focus();
     const commit = () => {
       const next = select.value;
-      if (next !== current) invalidateLineReviewAfterEdit(line, cell);
       activeInvoiceEditCell = null;
       if (next !== getLineSection(line)) {
         setLineSection(line, next);
@@ -942,10 +1085,18 @@ function attachInvoiceRowEditors(tr, line, accounts) {
     });
   }
   attachTextEditCell(tr.querySelector('[data-field="date"]'), line, 'date', { inputType: 'date' });
-  attachTextEditCell(tr.querySelector('[data-field="description"]'), line, 'description', { inputType: 'text' });
+  attachTextEditCell(tr.querySelector('[data-field="description"]'), line, 'description', {
+    inputType: 'text',
+    displayHtml: invoiceMemoHtml,
+    editOnDoubleClick: true,
+  });
+  attachTextEditCell(tr.querySelector('[data-field="remark"]'), line, 'remark', {
+    inputType: 'text',
+    displayHtml: invoiceRemarkHtml,
+    editOnDoubleClick: true,
+  });
   attachAccountEditCell(tr.querySelector('[data-field="accountCode"]'), line, accounts);
   attachTypeEditCell(tr.querySelector('[data-field="section"]'), line);
-  attachTextEditCell(tr.querySelector('[data-field="remark"]'), line, 'remark', { inputType: 'text' });
   attachTaxTypeEditCell(tr.querySelector('[data-field="taxType"]'), line);
   attachTextEditCell(tr.querySelector('[data-field="amount"]'), line, 'amount', {
     inputType: 'number',
@@ -958,12 +1109,18 @@ function attachInvoiceRowEditors(tr, line, accounts) {
   });
   tr.querySelector('.inv-preview-btn').addEventListener('click', (e) => {
     e.stopPropagation();
-    openPreview(line.receiptKey, line.receiptName);
+    commitActiveInvoiceEdit();
+    openPreview(line.receiptKey, line.receiptName, {
+      amount: formatCurrencyAmount('SGD', Number(line.amount)),
+      onReview: () => setLineReviewed(line, true, reviewBtn),
+    });
   });
   const unlinkBtn = tr.querySelector('.inv-unlink-btn');
   if (unlinkBtn) {
     unlinkBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      const proceed = window.confirm(`Unlink ${line.receiptName || line.description || 'this receipt'} from the invoice list?`);
+      if (!proceed) return;
       unlinkInvoiceLine(line, unlinkBtn);
     });
   }
@@ -973,7 +1130,7 @@ async function unlinkInvoiceLine(line, btn) {
   const originalText = btn?.textContent;
   if (btn) {
     btn.disabled = true;
-    btn.textContent = 'Unlinking...';
+    btn.textContent = '…';
   }
   try {
     const res = await fetch(`${API_BASE}/receipt/${encodeURIComponent(line.receiptKey)}/link`, {
@@ -983,12 +1140,57 @@ async function unlinkInvoiceLine(line, btn) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
     showStatus('success', `Unlinked ${line.receiptName || line.description || 'receipt'} from the invoice list.`);
-    await refreshInvoicesView({ showLoading: false });
+    await refreshInvoicesView({ showLoading: false, reloadClaims: false });
   } catch (err) {
     showStatus('error', `Could not unlink receipt: ${err instanceof Error ? err.message : String(err)}`);
     if (btn) {
       btn.disabled = false;
-      btn.textContent = originalText || 'Unlink';
+      btn.textContent = originalText || '⛔';
+    }
+  }
+}
+
+async function clearLeftoverDraftStamps(bucket, btn) {
+  const keys = leftoverDraftStampKeys(bucketLines(bucket));
+  if (keys.length === 0) {
+    showStatus('error', `No leftover draft stamps in ${BUCKET_LABEL[bucket]}.`);
+    return;
+  }
+  const proceed = window.confirm(
+    `Clear leftover draft stamps from ${keys.length} ${BUCKET_LABEL[bucket]} receipt${keys.length === 1 ? '' : 's'}? ` +
+    'This only removes portal metadata (xeroPending*). It does not delete receipts or mark anything claimed.',
+  );
+  if (!proceed) return;
+
+  const originalText = btn?.textContent;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Clearing...';
+  }
+  try {
+    const failures = [];
+    for (const key of keys) {
+      const res = await fetch(`${API_BASE}/receipt/${encodeURIComponent(key)}/xero-pending`, {
+        method: 'PATCH',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clear: true }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.error) {
+        failures.push(`${key}: ${data.error || `HTTP ${res.status}`}`);
+      }
+    }
+    if (failures.length) {
+      showStatus('error', `Cleared with issues: ${failures.slice(0, 2).join(' ')}`);
+    } else {
+      showStatus('success', `Cleared leftover draft stamps from ${keys.length} receipt${keys.length === 1 ? '' : 's'}.`);
+    }
+    await refreshInvoicesView({ showLoading: false, reloadClaims: false });
+  } catch (err) {
+    showStatus('error', `Could not clear draft stamps: ${err instanceof Error ? err.message : String(err)}`);
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = originalText || 'Clear stale draft stamps';
     }
   }
 }
@@ -1035,6 +1237,10 @@ function bindInvoiceSectionEvents() {
     const claimBtn = section.querySelector('.invoice-claim-checked-btn');
     if (claimBtn) {
       claimBtn.addEventListener('click', () => markCheckedSectionClaimed(bucket, claimBtn));
+    }
+    const clearStampsBtn = section.querySelector('.invoice-clear-stamps-btn');
+    if (clearStampsBtn) {
+      clearStampsBtn.addEventListener('click', () => clearLeftoverDraftStamps(bucket, clearStampsBtn));
     }
     const sortSelect = section.querySelector('.invoice-sort-select');
     if (sortSelect) {
@@ -1092,15 +1298,24 @@ function renderInvoiceEditorDeferred() {
   });
 }
 
-async function refreshInvoicesView({ showLoading = true } = {}) {
+// Rebuild and render the editor from data that is already loaded (page init,
+// auth success), so the Invoices tab doesn't fetch everything a second time.
+export function renderInvoicesFromLoadedData() {
+  buildInvoiceLines();
+  renderInvoiceEditor();
+  setInvoicesLoading(false);
+}
+
+// reloadClaims: false when the action only touched receipt metadata (unlink,
+// GST detection, push) — claim memos only change on "mark claimed".
+async function refreshInvoicesView({ showLoading = true, reloadClaims = true } = {}) {
   commitActiveInvoiceEdit();
   if (showLoading) {
     invoiceLoadingRequests += 1;
     setInvoicesLoading(true);
   }
   try {
-    await loadReceipts();
-    await loadYnabTodos();
+    await Promise.all([loadReceipts(), reloadClaims ? loadYnabTodos() : Promise.resolve()]);
     buildInvoiceLines();
     await renderInvoiceEditorDeferred();
   } finally {
@@ -1187,13 +1402,21 @@ function lineTaxTypeForPush(line, bucket) {
 }
 
 function pushPayloadForLines(bucket, reference, lines, pageRefs = null) {
+  const claimBackends = [...new Set(lines.filter((line) => line.ynabClaimId).map((line) => line.claimsBackend))];
+  if (claimBackends.length > 1 || claimBackends.some((backend) => backend !== 'howmuch' && backend !== 'ynab')) {
+    throw new Error('Invoice lines must come from one known claims backend.');
+  }
+  const backend = claimBackends[0] || getClaimsBackend();
   return {
     bucket,
     reference,
+    backend,
     lineItems: lines.map((l) => ({
       receiptKey: l.receiptKey,
       ynabClaimId: l.ynabClaimId,
-      xeroPendingInvoiceId: l.xeroPendingInvoiceId || '',
+      claimSource: l.claimSource || null,
+      claimDescription: l.claimDescription || null,
+      claimsBackend: l.claimsBackend || backend,
       date: l.date,
       description: lineToDescriptionWithPageRef(l, pageRefs),
       accountCode: l.accountCode,
@@ -1593,7 +1816,8 @@ async function downloadReceiptsPdf(payload, btn) {
 }
 
 function lineItemKey(item) {
-  return `${item.receiptKey || ''}::${item.ynabClaimId || ''}`;
+  const backend = item?.claimsBackend === 'ynab' ? 'ynab' : item?.claimsBackend === 'howmuch' ? 'howmuch' : '';
+  return `${backend}::${legacyLineItemKey(item)}`;
 }
 
 function checkedClaimLineItems(bucket, payload) {
@@ -1606,10 +1830,21 @@ function checkedClaimLineItems(bucket, payload) {
 }
 
 async function submitClaimed(invoiceID, lineItems) {
+  const backends = [...new Set(lineItems.filter((item) => item.ynabClaimId).map(rememberedClaimsBackendForItem))];
+  if (backends.length > 1) throw new Error('Cannot mark claims from different backends together.');
+  const backend = backends[0] || getClaimsBackend();
+  const claimsById = new Map(claimsData.map((claim) => [claim.id, claim]));
+  const attributedLineItems = lineItems.map((item) => ({
+    ...item,
+    claimsBackend: item.ynabClaimId ? rememberedClaimsBackendForItem(item) : undefined,
+    claimDescription: item.ynabClaimId
+      ? claimsById.get(item.ynabClaimId)?.description || item.claimDescription
+      : undefined,
+  }));
   const res = await fetch(`${API_BASE}/xero/invoices/mark-claimed`, {
     method: 'POST',
     headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ invoiceID, lineItems }),
+    body: JSON.stringify({ invoiceID, lineItems: attributedLineItems, backend }),
   });
   const result = await res.json().catch(() => ({}));
   if (!res.ok || result.error) {
@@ -1625,7 +1860,7 @@ async function submitClaimed(invoiceID, lineItems) {
 
 function checkedCurrentPayload(bucket) {
   const lines = pushableBucketLines(bucket).filter(isLineReviewed);
-  return pushPayloadForLines(bucket, `${BUCKET_LABEL[bucket]} claims`, lines);
+  return pushPayloadForLines(bucket, defaultDraftReference(bucket, lines), lines);
 }
 
 function groupedLineItemsByInvoice(lineItems) {
@@ -1665,9 +1900,9 @@ async function markLineItemGroupsClaimed(groups, bucket) {
   }
   if (failedYnab || failedReceipts) {
     const detail = failureDetails.length ? ` ${failureDetails.slice(0, 2).join(' ')}` : '';
-    showStatus('error', `Marked with issues: ${failedReceipts} receipt tag failure(s), ${failedYnab} YNAB failure(s), ${skippedYnab} skipped.${detail}`);
+    showStatus('error', `Marked with issues: ${failedReceipts} receipt tag failure(s), ${failedYnab} backend failure(s), ${skippedYnab} skipped.${detail}`);
   } else {
-    showStatus('success', `Marked ${count} checked ${BUCKET_LABEL[bucket]} item${count === 1 ? '' : 's'} claimed${claimedDate ? ` for ${claimedDate}` : ''}${skippedYnab ? ` (${skippedYnab} YNAB subtransaction(s) skipped)` : ''}.`);
+    showStatus('success', `Marked ${count} checked ${BUCKET_LABEL[bucket]} item${count === 1 ? '' : 's'} claimed${claimedDate ? ` for ${claimedDate}` : ''}${skippedYnab ? ` (${skippedYnab} subtransaction(s) skipped)` : ''}.`);
   }
 }
 
@@ -1687,7 +1922,7 @@ async function markCheckedLineItemsClaimed(bucket, lineItems, btn, { payload = n
       : groupedLineItemsByInvoice(lineItems);
     if (missing.length > 0) {
       throw new Error(
-        `${missing.length} checked ${BUCKET_LABEL[bucket]} item${missing.length === 1 ? '' : 's'} do not have a remembered Xero draft bill. Re-push or use the draft-created action before marking claimed.`,
+        `${missing.length} checked ${BUCKET_LABEL[bucket]} item${missing.length === 1 ? '' : 's'} do not have a remembered bill from a push in this browser. Push first, or use the draft-created action, before marking claimed.`,
       );
     }
     await markLineItemGroupsClaimed(groups, bucket);
@@ -1791,9 +2026,9 @@ function invoicePushSummary(bucket, lines) {
   const lineLabel = lines.length === 1 ? '1 line' : `${lines.length} lines`;
   const receiptLabel = receiptCount === 1 ? '1 receipt' : `${receiptCount} receipts`;
   return [
-    `${lineLabel} · S$${total.toFixed(2)} → Soon Yin Jie (${BUCKET_LABEL[bucket]}, draft)`,
+    `${lineLabel} · S$${total.toFixed(2)} → Soon Yin Jie (${BUCKET_LABEL[bucket]})`,
     `Attempts Xero attachment and prepares a downloadable ${receiptLabel} PDF in this list order; line descriptions include receipt page references.`,
-    'YNAB TODO memos change only when you click Mark checked as claimed.',
+    'TODO memos change in the selected backend only when you click Mark checked as claimed.',
   ].join('\n');
 }
 
@@ -1823,8 +2058,8 @@ async function pushInvoice(bucket, btn) {
     return;
   }
   const reference = window.prompt(
-    `${invoicePushSummary(bucket, lines)}\n\nReference / note for this Xero DRAFT bill:`,
-    `${BUCKET_LABEL[bucket]} claims`,
+    `${invoicePushSummary(bucket, lines)}\n\nReference / note for this bill:`,
+    defaultDraftReference(bucket, lines),
   );
   if (reference === null) return;
 
@@ -1874,7 +2109,7 @@ async function pushInvoice(bucket, btn) {
     showSectionPushResult(bucket, data, warnings, payload);
 
     try {
-      await refreshInvoicesView({ showLoading: false });
+      await refreshInvoicesView({ showLoading: false, reloadClaims: false });
       showSectionPushResult(bucket, data, warnings, payload);
     } catch (refreshErr) {
       showStatus(
@@ -1890,23 +2125,31 @@ async function pushInvoice(bucket, btn) {
   }
 }
 
-async function loadXeroStatus() {
+// Renders into every [data-xero-status] element: the Invoices bar and the
+// Xero section of the Settings dialog share the same status and controls.
+function renderXeroStatus(html) {
+  xeroStatusEls.forEach((el) => {
+    el.innerHTML = html;
+    el.querySelector('.xero-disconnect-btn')?.addEventListener('click', disconnectXero);
+    el.querySelector('.xero-connect-btn')?.addEventListener('click', connectXero);
+  });
+}
+
+export async function loadXeroStatus() {
   try {
     const res = await fetch(`${API_BASE}/xero/status`, { headers: authHeaders() });
     const data = await res.json();
     xeroConnected = Boolean(data.connected);
     if (xeroConnected) {
-      xeroStatusEl.innerHTML = `Connected to <strong>${escapeHtml(data.tenantName || 'Xero')}</strong> · <button type="button" id="xeroDisconnectBtn" class="link-button">disconnect</button>`;
-      const dc = document.getElementById('xeroDisconnectBtn');
-      if (dc) dc.addEventListener('click', disconnectXero);
+      renderXeroStatus(`Connected to <strong>${escapeHtml(data.tenantName || 'Xero')}</strong><button type="button" class="link-button xero-disconnect-btn">disconnect</button>`);
       loadXeroMeta();
     } else {
-      xeroStatusEl.innerHTML = `Not connected to Xero. <button type="button" id="xeroConnectBtn" class="btn-primary btn-connect">Connect Xero</button>`;
-      const cb = document.getElementById('xeroConnectBtn');
-      if (cb) cb.addEventListener('click', connectXero);
+      renderXeroStatus('Not connected to Xero. <button type="button" class="btn-primary btn-connect xero-connect-btn">Connect Xero</button>');
     }
   } catch (err) {
-    xeroStatusEl.textContent = 'Could not check Xero status.';
+    xeroStatusEls.forEach((el) => {
+      el.textContent = 'Could not check Xero status.';
+    });
   }
 }
 
@@ -1961,10 +2204,10 @@ function updateModeNav(activeInvoices) {
 }
 
 function updateAppTitle(invoices) {
-  document.title = invoices ? 'Invoices — Receipt Upload' : 'Claims — Receipt Upload';
+  document.title = invoices ? 'Invoices · This Claimer' : 'Claims · This Claimer';
 }
 
-export function navigateToMode(invoices, { replace = false } = {}) {
+export function navigateToMode(invoices, { replace = false, refresh = true } = {}) {
   const targetPath = invoices ? INVOICES_PATH : '/';
   const state = { mode: invoices ? 'invoices' : 'claims' };
   if (replace) {
@@ -1973,7 +2216,7 @@ export function navigateToMode(invoices, { replace = false } = {}) {
     history.pushState(state, '', targetPath);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
-  showInvoicesView(invoices);
+  showInvoicesView(invoices, { refresh });
 }
 
 export function showInvoicesView(show, { refresh = true } = {}) {
@@ -1981,6 +2224,7 @@ export function showInvoicesView(show, { refresh = true } = {}) {
     clearSelection();
   }
   invoicesActive = show;
+  document.body.classList.toggle('invoices-active', show);
   if (claimsView) claimsView.hidden = show;
   invoicesView.hidden = !show;
   updateModeNav(show);
@@ -1990,6 +2234,10 @@ export function showInvoicesView(show, { refresh = true } = {}) {
     loadXeroStatus();
     if (refresh && getAuthToken()) {
       refreshInvoicesView({ showLoading: true });
+    } else if (!refresh && invoiceLines.length === 0) {
+      // The initial route reuses the shared page load rather than fetching a
+      // second time. Still show progress until that data is rendered.
+      setInvoicesLoading(true);
     }
   } else {
     closeActiveInvoiceEdit({ commit: true });
@@ -1997,6 +2245,13 @@ export function showInvoicesView(show, { refresh = true } = {}) {
 }
 
 export function initInvoices() {
+  window.addEventListener('claims-backend-change', (event) => {
+    closeActiveInvoiceEdit({ commit: false });
+    invoiceLines = [];
+    if (event.detail?.loaded) buildInvoiceLines();
+    if (invoicesActive) renderInvoiceEditor();
+  });
+
   document.querySelectorAll('.app-nav-link').forEach((link) => {
     link.addEventListener('click', (event) => {
       if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) {
@@ -2040,7 +2295,7 @@ export function initInvoices() {
         if (result.remaining <= 0 || result.processed === 0 || result.tagged === 0) break;
       }
       detectGstBtn.textContent = failed ? `Done: ${tagged} tagged, ${failed} failed` : `Done: ${tagged} tagged`;
-      await refreshInvoicesView({ showLoading: false });
+      await refreshInvoicesView({ showLoading: false, reloadClaims: false });
     } catch (error) {
       detectGstBtn.textContent = 'Detect GST failed';
       console.error('GST detection failed', error);

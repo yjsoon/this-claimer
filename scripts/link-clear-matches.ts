@@ -40,6 +40,7 @@ interface AgentReport {
 
 interface Args {
   apply: boolean;
+  backend: 'howmuch' | 'ynab';
   sinceDate?: string;
   nearDays: number;
   allowUploadDate: boolean;
@@ -58,6 +59,9 @@ interface Candidate {
 function parseArgs(argv: string[]): Args {
   const args: Args = {
     apply: false,
+    // Preserve the existing claims-skill workflow, which still submits and
+    // cleans up against YNAB. The web app defaults to HowMuch independently.
+    backend: 'ynab',
     nearDays: 0,
     allowUploadDate: false,
   };
@@ -66,6 +70,14 @@ function parseArgs(argv: string[]): Args {
     const arg = argv[i];
     if (arg === '--apply') {
       args.apply = true;
+    } else if (arg === '--backend') {
+      const value = argv[++i];
+      if (value !== 'howmuch' && value !== 'ynab') throw new Error('--backend must be howmuch or ynab');
+      args.backend = value;
+    } else if (arg.startsWith('--backend=')) {
+      const value = arg.slice('--backend='.length);
+      if (value !== 'howmuch' && value !== 'ynab') throw new Error('--backend must be howmuch or ynab');
+      args.backend = value;
     } else if (arg === '--allow-upload-date') {
       args.allowUploadDate = true;
     } else if (arg === '--since-date') {
@@ -107,12 +119,13 @@ function parseInteger(value: string | undefined, name: string): number {
 function printHelp() {
   console.log(`Usage: npm run link:matches -- [options]
 
-Find clear one-to-one matches between unlinked YNAB TODO claims and unlinked receipts.
+Find clear one-to-one matches between unlinked TODO claims and unlinked receipts.
 Dry-run is the default. Add --apply to write receipt link metadata.
 
 Options:
   --apply              Link clear matches via PATCH /receipt/:key/link
-  --since-date DATE    Fetch YNAB TODOs since DATE (YYYY-MM-DD)
+  --backend NAME       Claims backend: ynab (default) or howmuch
+  --since-date DATE    Fetch TODOs since DATE (YYYY-MM-DD)
   --near-days N        Allow dates within N days; default 0 for exact date only
   --allow-upload-date  Use upload date when no manual/AI receipt date exists
 `);
@@ -256,7 +269,12 @@ async function fetchJson<T>(url: string, password: string, init?: RequestInit): 
   return await response.json() as T;
 }
 
-async function linkCandidate(baseUrl: string, password: string, candidate: Candidate): Promise<void> {
+async function linkCandidate(
+  baseUrl: string,
+  password: string,
+  backend: 'howmuch' | 'ynab',
+  candidate: Candidate
+): Promise<void> {
   await fetchJson<{ success: boolean }>(
     `${baseUrl}/receipt/${encodeURIComponent(candidate.receipt.key)}/link`,
     password,
@@ -264,6 +282,7 @@ async function linkCandidate(baseUrl: string, password: string, candidate: Candi
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        backend,
         linkedClaims: [{
           id: candidate.claim.id,
           description: candidate.claim.description,
@@ -280,6 +299,7 @@ async function main() {
   const baseUrl = requiredEnv('R2_WORKER_URL').replace(/\/+$/, '');
   const password = requiredEnv('R2_PASSWORD');
   const reportUrl = new URL(`${baseUrl}/agent/unclaimed-expenditures`);
+  reportUrl.searchParams.set('backend', args.backend);
   if (args.sinceDate) {
     reportUrl.searchParams.set('since_date', args.sinceDate);
   }
@@ -320,7 +340,7 @@ async function main() {
   }
 
   for (const candidate of clear) {
-    await linkCandidate(baseUrl, password, candidate);
+    await linkCandidate(baseUrl, password, args.backend, candidate);
     console.log(`Linked: ${describe(candidate)}`);
   }
 }

@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+node_version="20.20.2"
+node_install="$HOME/.local/share/node-v$node_version-linux-x64"
+node_archive="node-v$node_version-linux-x64.tar.xz"
+node_sha256="df770b2a6f130ed8627c9782c988fda9669fa23898329a61a871e32f965e007d"
+
+run_step() {
+  local label="$1"
+  shift
+
+  printf '\n==> %s\n' "$label"
+  time "$@"
+}
+
+install_node() {
+  local archive
+  local staging
+
+  if [[ -x "$node_install/bin/node" ]]; then
+    return
+  fi
+
+  archive="$(mktemp)"
+  staging="$node_install.tmp"
+  rm -rf -- "$staging"
+  mkdir -p -- "$staging"
+  curl -fsSL "https://nodejs.org/dist/v$node_version/$node_archive" -o "$archive"
+  printf '%s  %s\n' "$node_sha256" "$archive" | sha256sum --check --status
+  tar -xJf "$archive" --strip-components=1 -C "$staging"
+  rm -f -- "$archive"
+  rm -rf -- "$node_install"
+  mv -- "$staging" "$node_install"
+}
+
+run_step "Install Node.js $node_version" install_node
+export PATH="$node_install/bin:$PATH"
+
+profile_marker="# ynab-claimer Node.js 20"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<EOF
+
+$profile_marker
+if [[ "\${PWD}" == "$repo_root" ]]; then
+  export PATH="$node_install/bin:\$PATH"
+fi
+EOF
+fi
+
+if [[ ! -f "$repo_root/.env" ]]; then
+  cp -- "$repo_root/.env.example" "$repo_root/.env"
+  echo "Created .env from .env.example; add credentials as needed."
+fi
+
+if [[ ! -f "$repo_root/upload-app/.dev.vars" ]]; then
+  cp -- "$repo_root/upload-app/.dev.vars.example" "$repo_root/upload-app/.dev.vars"
+  echo "Created upload-app/.dev.vars from its example; add credentials as needed."
+fi
+
+run_step "Install scripts dependencies" npm ci --prefix "$repo_root/scripts"
+run_step "Install scripts Chromium" npm exec --prefix "$repo_root/scripts" -- playwright install chromium
+run_step "Install upload app dependencies" npm ci --prefix "$repo_root/upload-app"
+run_step "Install upload app Chromium" npm exec --prefix "$repo_root/upload-app" -- playwright install chromium
+
+printf '\nOrb setup complete (Node %s).\n' "$(node --version)"

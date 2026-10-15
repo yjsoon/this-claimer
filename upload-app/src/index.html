@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#f5f5f5" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0b1220" media="(prefers-color-scheme: dark)">
-  <title>Receipt Upload</title>
+  <title>This Claimer</title>
+  <link rel="help" type="text/plain" href="/llms.txt" title="Agent workflow guide">
   <script>
     (function () {
       const THEME_KEY = 'claim_manager_theme';
@@ -29,13 +30,25 @@
       document.documentElement.dataset.themePreference = preference;
     })();
   </script>
-  <link rel="stylesheet" href="/style.css?v=20260701-2325">
+  <link rel="stylesheet" href="/style.css?v=20261015-ai">
+  <!-- Preload the module graph so it loads in one round instead of a three-level waterfall -->
+  <link rel="modulepreload" href="/main.js?v=20261015-ai">
+  <link rel="modulepreload" href="/claims.js?v=20261015-ai">
+  <link rel="modulepreload" href="/gmail.js?v=20261015-ai">
+  <link rel="modulepreload" href="/ai.js?v=20261015-ai">
+  <link rel="modulepreload" href="/settings.js?v=20261015-ai">
+  <link rel="modulepreload" href="/invoices.js?v=20261015-ai">
+  <link rel="modulepreload" href="/lib/constants.js">
+  <link rel="modulepreload" href="/lib/core.js">
+  <link rel="modulepreload" href="/lib/state.js">
+  <link rel="modulepreload" href="/lib/match.js">
+  <link rel="modulepreload" href="/lib/preview.js?v=20260914-preview-review">
 </head>
 <body>
   <div id="authOverlay" class="auth-overlay" style="display: none;">
     <div class="auth-modal">
       <h2>Authentication Required</h2>
-      <input type="password" id="passwordInput" placeholder="Enter password" autofocus>
+      <input type="password" id="passwordInput" aria-label="Password" autocomplete="current-password" placeholder="Enter password" autofocus>
       <label class="remember-label">
         <input type="checkbox" id="rememberMe">
         Remember me
@@ -47,43 +60,100 @@
   <div class="container">
     <header class="app-header">
       <div class="app-header-row">
-        <h1>Receipt Upload</h1>
-        <button
-          id="themeToggle"
-          class="btn-theme-toggle"
-          type="button"
-          aria-label="Colour theme: system. Click to change."
-          title="System theme"
-        ></button>
-      </div>
-      <nav class="app-nav" aria-label="App mode">
-        <a href="/" class="app-nav-link" id="navClaims" data-mode="claims">Claims</a>
-        <a href="/invoices" class="app-nav-link" id="navInvoices" data-mode="invoices">
-          Invoices <span id="invoicesNavBadge" class="nav-badge" hidden></span>
+        <a href="/" class="app-brand" id="appBrand">
+          <span class="app-brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h6"/></svg>
+          </span>
+          <h1>This Claimer</h1>
         </a>
-      </nav>
+        <nav class="app-nav" aria-label="App mode">
+          <a href="/" class="app-nav-link" id="navClaims" data-mode="claims">Claims</a>
+          <a href="/invoices" class="app-nav-link" id="navInvoices" data-mode="invoices">
+            Invoices <span id="invoicesNavBadge" class="nav-badge" hidden></span>
+          </a>
+        </nav>
+        <div class="app-header-controls">
+          <label class="backend-picker">
+            <span class="backend-picker-label">Claims from</span>
+            <select id="claimsBackend" aria-label="Claims backend">
+              <option value="howmuch">HowMuch</option>
+              <option value="ynab">YNAB</option>
+            </select>
+          </label>
+          <button
+            id="settingsBtn"
+            class="btn-header-icon btn-settings"
+            type="button"
+            aria-label="Settings"
+            title="Settings"
+            aria-haspopup="dialog"
+            aria-controls="settingsDialog"
+          >
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            <span id="settingsAlert" class="attention-dot" hidden><span class="visually-hidden"> (needs attention)</span></span>
+          </button>
+          <button
+            id="themeToggle"
+            class="btn-header-icon btn-theme-toggle"
+            type="button"
+            aria-label="Colour theme: system. Click to change."
+            title="System theme"
+          ></button>
+        </div>
+      </div>
     </header>
 
     <div id="claimsView" class="claims-view">
-    <div id="dropzone" class="dropzone">
-      <input type="file" id="fileInput" accept="image/*,.pdf" multiple>
-      <div class="dropzone-expanded">
-        <p>Tap to upload or drag files here</p>
-        <p class="hint">Images and PDFs accepted</p>
-      </div>
-      <p class="dropzone-compact-label" hidden>+ Upload receipt</p>
-    </div>
-
-    <div id="status" class="status"></div>
-
     <div class="claims-toolbar">
-      <button id="refreshBtn" class="btn-refresh" type="button">Refresh</button>
+      <div id="dropzone" class="dropzone is-compact">
+        <input type="file" id="fileInput" aria-label="Upload receipts" accept="image/*,.pdf" multiple>
+        <div class="dropzone-expanded">
+          <p>Tap to upload or drag receipts here</p>
+          <p class="hint">Images and PDFs accepted</p>
+        </div>
+        <p class="dropzone-compact-label">
+          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+          Upload receipts
+        </p>
+      </div>
+      <div class="claims-toolbar-actions">
+        <button id="findMatchesBtn" class="btn-secondary btn-compact" type="button">Find matches</button>
+        <button id="refreshBtn" class="btn-refresh" type="button">Refresh</button>
+      </div>
     </div>
+
+    <!-- Quiet, dismissible notice when a linked Gmail account has stopped importing -->
+    <div id="gmailNotice" class="gmail-notice" role="status" hidden>
+      <p id="gmailNoticeText" class="gmail-notice-text"></p>
+      <div class="gmail-notice-actions">
+        <button id="gmailNoticeOpen" class="btn-secondary btn-compact" type="button">Open settings</button>
+        <button id="gmailNoticeDismiss" class="btn-refresh" type="button">Dismiss</button>
+      </div>
+    </div>
+
+    <section id="matchReviewSection" class="match-review-section" hidden>
+      <div class="match-review-header">
+        <button id="matchReviewToggle" class="match-review-toggle" type="button" aria-expanded="true" aria-controls="matchReviewBody">
+          <span class="match-review-chevron" aria-hidden="true"></span>
+          <h2>Match review <span id="matchReviewCount">(0)</span></h2>
+        </button>
+        <div class="match-review-actions">
+          <button id="acceptAllClearBtn" class="btn-primary btn-compact" type="button" hidden>Accept all clear</button>
+          <button id="clearDismissedMatchesBtn" class="btn-secondary btn-compact" type="button" hidden>Clear dismissed</button>
+        </div>
+      </div>
+      <div id="matchReviewBody" class="match-review-body">
+        <p class="match-review-intro">
+          Best-effort claim ↔ receipt suggestions. Accept to link, reject to dismiss, or change to pick another receipt.
+        </p>
+        <ul id="matchReviewList" class="match-review-list"></ul>
+      </div>
+    </section>
 
     <!-- Mobile tab toggle -->
     <div class="tab-toggle">
       <button class="tab-btn active" data-tab="claims">
-        To match <span id="claimBadge" class="badge"></span>
+        Claims <span id="claimBadge" class="badge"></span>
       </button>
       <button class="tab-btn" data-tab="receipts">
         Receipts <span id="receiptBadge" class="badge"></span>
@@ -100,7 +170,7 @@
             id="claimFilterInput"
             class="claim-filter-input"
             aria-label="Hide outstanding claims by keyword"
-            placeholder="Hide words or phrases"
+            placeholder="Hide claims containing…"
             autocomplete="off"
           >
           <div id="claimFilterPills" class="claim-filter-pills" role="group" aria-label="Quick hide filters"></div>
@@ -110,13 +180,19 @@
       </div>
 
       <div class="list-column" id="receiptsColumn">
-        <h2>Outstanding Receipts <span id="count">(0)</span></h2>
+        <h2 class="column-title">
+          <span class="column-title-text">Outstanding Receipts <span id="count">(0)</span></span>
+          <button id="gmailReceiptsMeta" class="column-meta" type="button" hidden aria-label="Gmail import status. Opens settings."></button>
+        </h2>
         <ul id="receiptList" class="receipt-list"></ul>
       </div>
     </div>
 
     <div class="linked-section">
-      <h2>Ready to Claim <span id="linkedCount">(0)</span></h2>
+      <div class="section-heading">
+        <h2>Ready to Claim <span id="linkedCount">(0)</span></h2>
+        <a href="/invoices" class="section-link">Invoice these in Xero<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></a>
+      </div>
       <ul id="linkedList" class="linked-pair-list"></ul>
     </div>
 
@@ -125,11 +201,10 @@
         <p id="linkingContextText" class="linking-context-text"></p>
         <div class="linking-context-actions">
           <button id="linkingContextPreview" class="btn-secondary btn-compact" type="button" hidden>Preview</button>
-          <button id="linkingContextChange" class="btn-secondary btn-compact" type="button">Change</button>
         </div>
       </div>
       <div id="actionBar" class="action-bar">
-        <span id="actionText">Select a claim to link</span>
+        <span id="actionText">Pick a claim or receipt to link</span>
         <div class="action-buttons">
           <button id="confirmSelection" class="btn-primary" hidden>Link selected</button>
           <button id="markReadySelection" class="btn-primary" hidden>Mark ready</button>
@@ -142,7 +217,7 @@
     <!-- Invoices view: assemble ready-to-claim items into Xero draft bills -->
     <div id="invoicesView" class="invoices-view" hidden>
       <div class="invoices-bar">
-        <div id="xeroStatus" class="xero-status">Checking Xero…</div>
+        <div id="xeroStatus" class="xero-status" data-xero-status>Checking Xero…</div>
         <div class="invoices-bar-actions">
           <button id="detectGstBtn" class="btn-secondary" type="button" title="Run GST detection on receipts without a verdict yet">Detect GST</button>
           <button id="invoicesRefreshBtn" class="btn-refresh" type="button">Refresh</button>
@@ -150,8 +225,8 @@
       </div>
 
       <p class="invoices-intro">
-        Review ready-to-claim items grouped into draft bills (payee <strong>Soon Yin Jie</strong>).
-        Tap ✓ on each line after checking the receipt; push each section to Xero when every line is reviewed.
+        Ready-to-claim items grouped into the three Xero bills. If a line is still here, it is not claimed:
+        pushing a draft leaves memos as <strong>TODO</strong> until you mark checked lines claimed.
       </p>
 
       <div id="invoicesLoading" class="invoices-loading" hidden aria-live="polite">
@@ -161,10 +236,105 @@
 
       <div id="invoicesSections" class="invoices-sections"></div>
       <p id="invoicesEmpty" class="empty-state" hidden>
-        No ready-to-claim items. Mark receipts ready or link them to YNAB claims first.
+        No ready-to-claim items. Mark receipts ready or link them to claims first.
       </p>
     </div>
   </div>
+
+  <!-- Settings: integrations and one-time setup, opened from the header gear.
+       Each integration is a .settings-section: a head (h3 title, one-line
+       description, optional actions) and a body. -->
+  <dialog id="settingsDialog" class="settings-dialog" aria-labelledby="settingsTitle">
+    <div class="settings-head">
+      <h2 id="settingsTitle">Settings</h2>
+      <button id="settingsClose" class="settings-close" type="button" aria-label="Close settings">
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="settings-body">
+      <section id="gmailSettingsSection" class="settings-section" aria-labelledby="gmailHeading">
+        <div class="settings-section-head">
+          <div class="settings-section-titles">
+            <h3 id="gmailHeading">Gmail import <span id="gmailCount"></span></h3>
+            <p id="gmailIntro" class="settings-section-desc" aria-live="polite">Checking Gmail…</p>
+          </div>
+          <div class="settings-section-actions">
+            <button id="gmailScanBtn" class="btn-secondary btn-compact" type="button" hidden>Scan now</button>
+            <button id="gmailConnectBtn" class="btn-primary btn-compact" type="button">Link Gmail account</button>
+          </div>
+        </div>
+        <div class="settings-section-body">
+          <form id="gmailSetup" class="gmail-setup" hidden>
+            <ol class="gmail-setup-steps">
+              <li>In Google Cloud, <a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com" target="_blank" rel="noopener">enable the Gmail API</a> for a project.</li>
+              <li>Under <a href="https://console.cloud.google.com/auth/clients" target="_blank" rel="noopener">Clients</a>, create a <strong>Web application</strong> client with this redirect URI:
+                <span class="gmail-redirect"><code id="gmailRedirectUri"></code><button id="gmailCopyRedirect" class="btn-secondary btn-compact" type="button">Copy</button></span>
+              </li>
+              <li>Under <a href="https://console.cloud.google.com/auth/audience" target="_blank" rel="noopener">Audience</a>, publish the app to production, so sign-ins don't expire after 7 days.</li>
+              <li>Paste the client ID and secret below.</li>
+            </ol>
+            <div class="gmail-setup-fields">
+              <label class="gmail-field">
+                <span>Client ID</span>
+                <input id="gmailClientId" class="gmail-input" type="text" autocomplete="off" spellcheck="false" placeholder="…apps.googleusercontent.com" required>
+              </label>
+              <label class="gmail-field">
+                <span>Client secret</span>
+                <input id="gmailClientSecret" class="gmail-input" type="password" autocomplete="off" spellcheck="false" required>
+              </label>
+            </div>
+            <p id="gmailSetupNote" class="gmail-setup-note" hidden>Accounts linked with the old client will need reconnecting.</p>
+            <div class="gmail-setup-actions">
+              <button id="gmailSetupSave" class="btn-primary btn-compact" type="submit">Save</button>
+              <button id="gmailSetupCancel" class="btn-secondary btn-compact" type="button" hidden>Cancel</button>
+            </div>
+          </form>
+          <ul id="gmailAccountList" class="gmail-account-list"></ul>
+          <p id="gmailClientInfo" class="gmail-client-info" hidden></p>
+        </div>
+      </section>
+
+      <section id="xeroSettingsSection" class="settings-section" aria-labelledby="xeroSettingsHeading">
+        <div class="settings-section-head">
+          <div class="settings-section-titles">
+            <h3 id="xeroSettingsHeading">Xero</h3>
+            <p class="settings-section-desc">Draft bills from the Invoices tab are created in this organisation.</p>
+          </div>
+        </div>
+        <div class="settings-section-body">
+          <div class="settings-xero-status" data-xero-status aria-live="polite">Checking Xero…</div>
+        </div>
+      </section>
+
+      <section id="aiSettingsSection" class="settings-section" aria-labelledby="aiSettingsHeading">
+        <div class="settings-section-head">
+          <div class="settings-section-titles">
+            <h3 id="aiSettingsHeading">AI</h3>
+            <p class="settings-section-desc">Keys for reading receipts and for Claude's help in Find matches. A key saved here replaces the matching Worker secret and is never shown again.</p>
+          </div>
+        </div>
+        <div class="settings-section-body">
+          <ul id="aiProviderList" class="ai-provider-list"><li class="ai-provider-empty">Loading…</li></ul>
+          <div class="ai-choices">
+            <label class="gmail-field">
+              <span>Read receipts with</span>
+              <select id="aiVisionProvider"></select>
+              <span class="ai-choice-hint">Tried first for amounts, dates and GST. Other providers with keys are the backup.</span>
+            </label>
+            <label class="gmail-field">
+              <span>Claude model</span>
+              <select id="aiClaudeModel"></select>
+              <span class="ai-choice-hint">Used when Claude reads receipts and when Find matches asks Claude.</span>
+            </label>
+          </div>
+          <p id="aiSettingsMessage" class="ai-settings-message" role="status" aria-live="polite"></p>
+        </div>
+      </section>
+    </div>
+  </dialog>
+
+  <!-- Status toast: fixed so it never shifts the layout -->
+  <div id="status" class="status" role="status" aria-live="polite"></div>
 
   <!-- Receipt Preview Modal -->
   <div id="previewOverlay" class="preview-overlay">
@@ -183,11 +353,15 @@
           <div class="spinner"></div>
         </div>
         <img id="previewImage" class="preview-image" alt="Receipt preview">
-        <iframe id="previewPdf" class="preview-pdf"></iframe>
+        <iframe id="previewPdf" class="preview-pdf" title="Receipt PDF preview"></iframe>
+      </div>
+      <div id="previewReview" class="preview-review" hidden>
+        <span>Registered amount: <strong id="previewAmount"></strong></span>
+        <button id="previewReviewBtn" class="preview-review-btn" type="button" aria-label="Mark invoice line as reviewed and close preview">✓</button>
       </div>
     </div>
   </div>
 
-  <script type="module" src="/main.js?v=20260701-2325"></script>
+  <script type="module" src="/main.js?v=20261015-ai"></script>
 </body>
 </html>

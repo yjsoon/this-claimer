@@ -7,6 +7,17 @@ description: Process expense claims by matching YNAB transactions with uploaded 
 
 Process expense claims by matching YNAB transactions with uploaded receipts.
 
+## Backend Boundary
+
+This workflow is explicitly **YNAB-only**. Before matching, run the conservative helper with an explicit backend and show its complete dry-run output to the user:
+
+```bash
+cd scripts
+npm run link:matches -- --backend ynab
+```
+
+Do not apply the helper without the confirmation required by the repository instructions. Treat a receipt link as YNAB-owned only when `linkedClaimsBackend` is `"ynab"` or absent (legacy links). Never match, unlink, delete, or mark a `"howmuch"`-owned link through this workflow. If the user wants to process HowMuch claims, stop and use the backend-aware web Claims/Invoices flow instead.
+
 ## Instructions
 
 You are helping the user process expense claims. Follow this workflow.
@@ -73,11 +84,12 @@ curl -s -H "X-Auth-Token: <R2_PASSWORD>" "<R2_WORKER_URL>/list" | jq '.receipts'
   "uploaded": "2025-01-01T12:00:00.000Z",
   "originalName": "receipt.pdf",
   "linkedClaimId": "ynab-transaction-id",      // If pre-linked
+  "linkedClaimsBackend": "ynab",               // "ynab" or "howmuch"; absent means legacy YNAB
   "linkedClaimDescription": "ChatGPT"          // Claim description
 }
 ```
 
-**Pre-linked receipts**: When `linkedClaimId` is present, auto-match this receipt to the corresponding YNAB TODO - skip manual matching for these.
+**Pre-linked receipts**: Auto-match only when `linkedClaimId` is present and `linkedClaimsBackend` is `"ynab"` or absent. Ignore HowMuch-owned links in this YNAB workflow.
 
 ### 4. Identify All Receipts
 
@@ -120,7 +132,7 @@ Collect all agent results and build the receipt manifest for matching.
 Compare TODOs against **identified** receipts and show a summary:
 
 **Matching priority:**
-1. **Pre-linked receipts** - If `linkedClaimId` matches a TODO's transaction ID, use that receipt (highest priority)
+1. **Pre-linked receipts** - If a YNAB-owned `linkedClaimId` matches a TODO's transaction ID, use that receipt (highest priority)
 2. **Date proximity** - Within 3 days
 3. **Amount match** - Exact or within 10%
 
@@ -190,7 +202,7 @@ For each TODO transaction:
    - Category: [category_name]
 
 2. **Find matching receipt(s)**:
-   - **Pre-linked**: If receipt has `linkedClaimId` matching this transaction, use it automatically (skip manual matching)
+   - **Pre-linked**: If the receipt has `linkedClaimsBackend: "ynab"` (or an absent legacy backend) and `linkedClaimId` matches this transaction, use it automatically. Never use a HowMuch-owned link.
    - Otherwise, match by: date proximity (within 3 days), amount match (exact or close)
    - Show top matches and let user confirm
 
@@ -252,9 +264,11 @@ For each TODO transaction:
    **Background cleanup agent prompt**:
    ```
    "Complete claim cleanup for transaction [TRANSACTION_ID]:
-   1. Update YNAB memo from 'TODO: X' to 'CLAIMED: X' via PUT to transactions API
-   2. Delete receipt [key] from R2 via DELETE endpoint
-   3. Delete local file /tmp/claims/[filename] using trash command
+   Verified source provenance at handoff: linkedClaimsBackend=ynab.
+   1. Before any mutation, refetch receipt [key] from the R2 list and verify linkedClaimsBackend is exactly 'ynab'. Abort without updating YNAB or deleting anything if it is HowMuch, absent, or changed.
+   2. Update YNAB memo from 'TODO: X' to 'CLAIMED: X' via PUT to transactions API
+   3. Delete receipt [key] from R2 via DELETE endpoint
+   4. Delete local file /tmp/claims/[filename] using trash command
    Credentials: YNAB_API_KEY=[key], R2_WORKER_URL=[url], R2_PASSWORD=[pwd]"
    ```
 

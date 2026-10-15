@@ -12,7 +12,13 @@ XERO_CLIENT_SECRET = "your-xero-client-secret"
 # the worker can be exercised locally.
 AUTH_PASSWORD = "your-web-app-password"
 
-# Optional: YNAB + Gemini if you want those paths to work under `wrangler dev`.
+# HowMuch is the default claims backend. Create a PAT in HowMuch under personal
+# tokens; HOWMUCH_PLAN_ID may be omitted when it matches YNAB_BUDGET_ID.
+# HOWMUCH_PAT = "hm_pat_..."
+# HOWMUCH_PLAN_ID = "..."
+# HOWMUCH_API_URL = "https://howmuch.tk.sg/v1"
+
+# Optional: YNAB fallback + Gemini if you want those paths under `wrangler dev`.
 # YNAB_API_KEY = "..."
 # YNAB_BUDGET_ID = "..."
 # GEMINI_API_KEY = "..."
@@ -21,3 +27,21 @@ AUTH_PASSWORD = "your-web-app-password"
 # detection on image receipts. Falls back to Gemini when missing. See
 # VISION_PROVIDER in wrangler.toml.
 # MINIMAX_API_KEY = "..."
+
+# Optional: Anthropic API key (sk-ant-...) for reading receipts with Claude and
+# Claude's help in Find matches. Any of these AI keys can instead be pasted
+# under Settings > AI in the app, which wins over the secret. CLAUDE_MODEL is
+# optional (default claude-opus-5-5).
+# ANTHROPIC_API_KEY = "..."
+# CLAUDE_MODEL = "claude-opus-5-5"
+
+# Optional: Gmail receipt import. The client can instead be pasted into the
+# Gmail panel in the app. Google Cloud OAuth client (Web application)
+# with the Gmail API enabled. Add BOTH redirect URIs to the client:
+#   https://receipts.soon.sg/gmail/callback   (production)
+#   http://localhost:8787/gmail/callback       (wrangler dev default port)
+# GOOGLE_CLIENT_ID = "....apps.googleusercontent.com"
+# GOOGLE_CLIENT_SECRET = "..."
+# Optional: Cloudflare API token with "Browser Rendering - Edit", used to print
+# Grab/Gojek email receipts to PDF. Without it those emails are skipped.
+# CF_BROWSER_RENDERING_TOKEN = "..."

@@ -102,7 +102,8 @@ export async function checkAuth() {
   }
 
   try {
-    const response = await fetch(`${API_BASE}/list`, {
+    // Cheapest authenticated call: one receipt, not the default page of 100.
+    const response = await fetch(`${API_BASE}/list?limit=1`, {
       headers: authHeaders(),
     });
     if (response.status === 401) {
@@ -123,7 +124,7 @@ export async function handlePasswordSubmit() {
   setAuthToken(password, rememberMe.checked);
 
   try {
-    const response = await fetch(`${API_BASE}/list`, {
+    const response = await fetch(`${API_BASE}/list?limit=1`, {
       headers: authHeaders(),
     });
     if (response.status === 401) {
@@ -139,12 +140,20 @@ export async function handlePasswordSubmit() {
   }
 }
 
+let statusHideTimer = null;
+
 export function showStatus(type, message) {
+  // A stale success timer must not hide a newer message.
+  if (statusHideTimer) {
+    clearTimeout(statusHideTimer);
+    statusHideTimer = null;
+  }
   status.className = `status ${type}`;
   status.textContent = message;
 
   if (type === 'success') {
-    setTimeout(() => {
+    statusHideTimer = setTimeout(() => {
+      statusHideTimer = null;
       status.className = 'status';
     }, 3000);
   }
@@ -156,13 +165,12 @@ export function escapeHtml(str) {
   return div.innerHTML;
 }
 
+const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// "14 Sep 2026": unambiguous day-first form regardless of the browser locale.
 export function formatDateForLocale(date) {
-  return new Intl.DateTimeFormat(undefined, {
-    year: 'numeric',
-    month: 'numeric',
-    day: 'numeric',
-    timeZone: 'UTC',
-  }).format(date);
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '';
+  return `${date.getUTCDate()} ${MONTH_SHORT[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
 }
 
 export function formatCurrencyAmount(currency, amount) {

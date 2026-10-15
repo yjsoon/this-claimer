@@ -9,6 +9,12 @@ Process expense claims by matching YNAB transactions with uploaded receipts.
 Uses **dev-browser** for persistent browser sessions — login once, process many claims
 with an in-browser "DONE" button (no chat interaction needed between claims).
 
+## Backend Boundary
+
+This workflow is explicitly **YNAB-only**. Before matching, run `npm run link:matches -- --backend ynab` from `scripts/` and show the complete dry-run output to the user. Do not apply it without the confirmation required by the repository instructions.
+
+Treat a receipt link as YNAB-owned only when `linkedClaimsBackend` is `"ynab"` or absent (legacy links). Never match, unlink, delete, or mark a `"howmuch"`-owned link through this workflow. If the user wants HowMuch claims, stop and use the backend-aware web Claims/Invoices flow instead.
+
 ## Prerequisites
 
 - `dev-browser` installed globally (`npm i -g dev-browser && dev-browser install`)
@@ -72,7 +78,7 @@ List receipts from R2:
 curl -s -H "X-Auth-Token: <R2_PASSWORD>" "<R2_WORKER_URL>/list" | jq '.receipts'
 ```
 
-**Pre-linked receipts**: When `linkedClaimId` is present, auto-match this receipt to the corresponding YNAB TODO — skip manual matching for these.
+**Pre-linked receipts**: Auto-match only when `linkedClaimId` is present and `linkedClaimsBackend` is `"ynab"` or absent. Ignore HowMuch-owned links in this YNAB workflow.
 
 ### 4. Identify All Receipts
 
@@ -105,7 +111,7 @@ For each receipt, the agent should:
 Compare TODOs against **identified** receipts and show a summary:
 
 **Matching priority:**
-1. **Pre-linked receipts** - If `linkedClaimId` matches a TODO's transaction ID, use that receipt (highest priority)
+1. **Pre-linked receipts** - If a YNAB-owned `linkedClaimId` matches a TODO's transaction ID, use that receipt (highest priority)
 2. **Date proximity** - Within 3 days
 3. **Amount match** - Exact or within 10%
 
@@ -389,10 +395,12 @@ After the DONE button is clicked, **immediately show the next claim summary** an
 **Background cleanup agent prompt**:
 ```
 "Complete claim cleanup for transaction [TRANSACTION_ID]:
-1. Update YNAB memo from 'TODO: X' to 'CLAIMED: X' via PUT to transactions API
-2. Delete receipt [key] from R2 via DELETE endpoint
-3. Delete local file /tmp/claims/[filename] using trash command
-4. Remove ~/.dev-browser/tmp/receipt.b64
+Verified source provenance at handoff: linkedClaimsBackend=ynab.
+1. Before any mutation, refetch receipt [key] from the R2 list and verify linkedClaimsBackend is exactly 'ynab'. Abort without updating YNAB or deleting anything if it is HowMuch, absent, or changed.
+2. Update YNAB memo from 'TODO: X' to 'CLAIMED: X' via PUT to transactions API
+3. Delete receipt [key] from R2 via DELETE endpoint
+4. Delete local file /tmp/claims/[filename] using trash command
+5. Remove ~/.dev-browser/tmp/receipt.b64
 Credentials: YNAB_API_KEY=[key], YNAB_BUDGET_ID=[id], R2_WORKER_URL=[url], R2_PASSWORD=[pwd]"
 ```
 
