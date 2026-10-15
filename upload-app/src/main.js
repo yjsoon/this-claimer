@@ -27,11 +27,7 @@ initClaims();
 initInvoices();
 // Settings must exist before Gmail, which opens it after the OAuth callback.
 initSettings({
-  onOpen: () => {
-    void loadGmailStatus();
-    void loadXeroStatus();
-    void refreshAiSettings();
-  },
+  onOpen: () => Promise.allSettled([loadGmailStatus(), loadXeroStatus(), refreshAiSettings()]),
 });
 initGmail();
 initAiSettings();

@@ -6,6 +6,11 @@ const dialog = document.getElementById('settingsDialog');
 const openBtn = document.getElementById('settingsBtn');
 const closeBtn = document.getElementById('settingsClose');
 const alertDot = document.getElementById('settingsAlert');
+// The status toast lives outside the dialog; while the modal is open the rest
+// of the page is inert and under the backdrop, so the toast moves inside it.
+const statusEl = document.getElementById('status');
+const statusHome = statusEl?.parentNode || null;
+const statusNext = statusEl?.nextSibling || null;
 
 const attention = new Map();
 let onOpen = () => {};
@@ -34,10 +39,17 @@ export function openSettings({ focus } = {}) {
   returnFocusTo = document.activeElement instanceof HTMLElement ? document.activeElement : openBtn;
   if (typeof dialog.showModal === 'function') dialog.showModal();
   else dialog.setAttribute('open', '');
-  dialog.scrollTop = 0;
+  if (statusEl) dialog.append(statusEl);
+  const body = dialog.querySelector('.settings-body');
+  if (body) body.scrollTop = 0;
   const target = focus && dialog.querySelector(focus);
   (target || closeBtn).focus({ preventScroll: true });
-  onOpen();
+  // Opening refreshes the sections, which can replace the focused element;
+  // put focus back on the requested control once they have re-rendered.
+  void Promise.resolve(onOpen()).then(() => {
+    if (!focus || !dialog.open || dialog.contains(document.activeElement) && document.activeElement !== closeBtn) return;
+    dialog.querySelector(focus)?.focus({ preventScroll: true });
+  });
 }
 
 export function closeSettings() {
@@ -64,6 +76,7 @@ export function initSettings({ onOpen: openHandler } = {}) {
 
   // Esc fires cancel then close; either way, hand focus back to where it came from.
   dialog.addEventListener('close', () => {
+    if (statusEl && statusHome) statusHome.insertBefore(statusEl, statusNext);
     const target = returnFocusTo && document.contains(returnFocusTo) ? returnFocusTo : openBtn;
     returnFocusTo = null;
     target.focus({ preventScroll: true });
