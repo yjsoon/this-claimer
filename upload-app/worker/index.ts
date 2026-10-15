@@ -2057,7 +2057,7 @@ export default {
     // which Xero itself calls and which is trusted via its one-time state cookie.
     // (/xero/connect is a header-authed POST so the auth token never lands in a URL.)
     const isApiRoute =
-      ['/upload', '/list', '/receipt/', '/ynab/', '/amount-tags/', '/gst-tags/', '/agent/'].some(
+      ['/upload', '/list', '/receipt/', '/ynab/', '/amount-tags/', '/gst-tags/', '/agent/', '/ai/'].some(
         (route) => path === route || path.startsWith(route)
       ) ||
       (path.startsWith('/xero/') && path !== '/xero/callback') ||

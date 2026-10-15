@@ -98,6 +98,23 @@ async function main() {
 
   try {
     await waitForWorker(workerUrl, wrangler);
+
+    // AI settings and Claude matching hold and spend provider keys, so they
+    // must sit behind the app password like every other API route.
+    for (const [method, route, body] of [
+      ['GET', '/ai/settings'],
+      ['PUT', '/ai/settings', { keys: { anthropic: null } }],
+      ['POST', '/ai/match', { claims: [], receipts: [] }],
+    ]) {
+      const init = { method, headers: { 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) };
+      const anonymous = await fetch(`${workerUrl}${route}`, init);
+      assert.equal(anonymous.status, 401, `${method} ${route} must require X-Auth-Token`);
+      const wrongToken = await fetch(`${workerUrl}${route}`, { ...init, headers: { ...init.headers, 'X-Auth-Token': 'wrong' } });
+      assert.equal(wrongToken.status, 401, `${method} ${route} must reject a wrong token`);
+    }
+    const authed = await fetch(`${workerUrl}/ai/settings`, { headers: { 'X-Auth-Token': 'test-auth' } });
+    assert.equal(authed.status, 200);
+    assert.equal((await authed.json()).providers.length, 3);
     const lines = [lineItem('claim-1', 'First claim'), lineItem('claim-2', 'Second claim')];
     const success = await markClaimed(workerUrl, lines);
     assert.equal(success.response.status, 200, JSON.stringify(success.body));
@@ -136,7 +153,7 @@ async function main() {
     await new Promise((resolve) => howMuch.close(resolve));
   }
 
-  console.log('Worker HowMuch batch claim contract passed');
+  console.log('Worker HowMuch batch claim contract passed (and AI routes require auth)');
 }
 
 main().catch((error) => {

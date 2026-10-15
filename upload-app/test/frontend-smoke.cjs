@@ -192,6 +192,9 @@ async function main() {
         linkRequests.push({ key, linkedIds, backend: body.backend });
         return route.fulfill({ json: { success: true } });
       }
+      if (url.pathname === '/ai/settings') {
+        return route.fulfill({ json: { providers: [], visionProvider: 'minimax', claudeModel: 'claude-opus-5-5', claudeModels: [] } });
+      }
       if (url.pathname === '/xero/status') return route.fulfill({ json: { connected: true, tenantName: 'Test Xero' } });
       if (url.pathname === '/xero/meta') {
         return route.fulfill({

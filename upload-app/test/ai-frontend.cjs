@@ -63,6 +63,7 @@ async function run(browser, { viewport, colorScheme, name, full }) {
   const matchRequests = [];
   const linkRequests = [];
   let receiptData = receipts();
+  let settingsGets = 0;
 
   const page = await browser.newPage({ viewport, colorScheme });
   await page.addInitScript(() => {
@@ -77,7 +78,12 @@ async function run(browser, { viewport, colorScheme, name, full }) {
     if (url.pathname === '/ynab/todos') return route.fulfill({ json: { todos, backend: 'ynab' } });
     if (url.pathname === '/xero/status') return route.fulfill({ json: { connected: true, tenantName: 'Test Xero' } });
     if (url.pathname === '/gmail/status') return route.fulfill({ json: { configured: false, accounts: [] } });
-    if (url.pathname === '/ai/settings' && request.method() === 'GET') return route.fulfill({ json: settingsStatus(state) });
+    if (url.pathname === '/ai/settings' && request.method() === 'GET') {
+      settingsGets += 1;
+      // The first load fails, as if the request raced sign-in; Find matches must retry it.
+      if (settingsGets === 1) return route.fulfill({ status: 503, json: { error: 'unavailable' } });
+      return route.fulfill({ json: settingsStatus(state) });
+    }
     if (url.pathname === '/ai/settings' && request.method() === 'PUT') {
       const body = JSON.parse(request.postData() || '{}');
       puts.push(body);
@@ -118,6 +124,7 @@ async function run(browser, { viewport, colorScheme, name, full }) {
   const findMatches = page.getByRole('button', { name: 'Find matches' });
   await findMatches.click();
   await page.getByText('Found 1 suggestion (1 clear, 0 ambiguous)').waitFor();
+  assert.equal(settingsGets, 2, 'Find matches reloads AI settings that failed to load');
   assert.equal(matchRequests.length, 0, 'Find matches must not call Claude without a Claude key');
 
   // Settings dialog: add a Claude key (a rejected one first).

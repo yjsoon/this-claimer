@@ -45,7 +45,7 @@ import {
   makeSuggestionPairId,
 } from './lib/match.js';
 import { openPreview } from './lib/preview.js?v=20260914-preview-review';
-import { isClaudeConfigured } from './ai.js?v=20261015-ai';
+import { getAiStatus, isClaudeConfigured, loadAiSettings } from './ai.js?v=20261015-ai';
 
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
@@ -1003,10 +1003,10 @@ function claudeMatchPayload() {
   return { claims, receipts };
 }
 
-function setFindMatchesBusy(busy) {
+function setFindMatchesBusy(busy, label = 'Asking Claude…') {
   if (!findMatchesBtn) return;
   findMatchesBtn.disabled = busy;
-  findMatchesBtn.textContent = busy ? 'Asking Claude…' : 'Find matches';
+  findMatchesBtn.textContent = busy ? label : 'Find matches';
 }
 
 function ruleMatchSummary() {
@@ -1019,6 +1019,23 @@ function ruleMatchSummary() {
 // Claude about whatever the rules left unpaired.
 async function findMatches() {
   if (claudeMatchInFlight) return;
+  // AI settings may still be loading (or have failed) right after sign-in;
+  // check before deciding Claude isn't set up.
+  if (!getAiStatus()) {
+    claudeMatchInFlight = true;
+    setFindMatchesBusy(true, 'Finding matches…');
+    try {
+      await loadAiSettings();
+    } finally {
+      claudeMatchInFlight = false;
+      setFindMatchesBusy(false);
+    }
+    if (!getAiStatus()) {
+      refreshMatchSuggestions({ announce: false });
+      showStatus('error', "Couldn't check the AI settings, so only exact matches are shown. Try again.");
+      return;
+    }
+  }
   if (!isClaudeConfigured()) {
     refreshMatchSuggestions({ announce: true });
     return;
