@@ -550,7 +550,8 @@ select {
   color: var(--text-2);
 }
 
-.btn-theme-toggle {
+.btn-header-icon {
+  position: relative;
   flex-shrink: 0;
   width: 32px;
   height: 32px;
@@ -565,14 +566,33 @@ select {
   transition: background 0.15s, color 0.15s;
 }
 
-.btn-theme-toggle svg {
+.btn-header-icon svg {
   width: 16px;
   height: 16px;
 }
 
-.btn-theme-toggle:hover {
+.btn-header-icon:hover {
   background: var(--surface-2);
   color: var(--text);
+}
+
+/* Small dot on a control whose content needs a look (e.g. a Gmail account
+   that must be reconnected). Positioned on the corner of icon buttons. */
+.attention-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.btn-header-icon .attention-dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--bg);
+  box-sizing: content-box;
 }
 
 /* ---------- Claims view: toolbar + upload ------------------------------- */
@@ -1008,6 +1028,50 @@ select {
   padding: 14px 18px 12px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+}
+
+.column-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+}
+
+.column-title > .column-title-text {
+  min-width: 0;
+  font-weight: inherit;
+  color: inherit;
+}
+
+/* Keep the count's quiet style now that it is nested one level deeper */
+.column-title-text > span {
+  font-weight: 500;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Passive integration status, e.g. "Gmail · checked 14 Oct, 13:17" */
+.column-meta {
+  background: none;
+  border: none;
+  padding: 2px 6px;
+  margin: -2px -6px;
+  border-radius: var(--radius-sm);
+  font-size: 0.74rem;
+  font-weight: 500;
+  color: var(--text-3);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.column-meta:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.column-meta.is-error {
+  color: var(--danger);
 }
 
 .list-column > ul {
@@ -3284,48 +3348,11 @@ body.selecting .claims-view {
   }
 }
 
-/* ---------- Gmail import ------------------------------------------------ */
-.gmail-section {
-  margin-bottom: 16px;
-  padding: 14px 18px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
-}
-
-.gmail-section[hidden] {
-  display: none;
-}
-
-.gmail-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.gmail-header h2 {
-  margin: 0;
-}
-
-.gmail-actions,
+/* ---------- Gmail import (Settings dialog section) ---------------------- */
 .gmail-account-actions {
   display: flex;
   gap: 6px;
   flex-shrink: 0;
-}
-
-.gmail-actions [hidden],
-.gmail-account-actions [hidden] {
-  display: none;
-}
-
-.gmail-intro {
-  margin: 10px 0;
-  font-size: 0.82rem;
-  color: var(--text-2);
 }
 
 .gmail-account-list {
@@ -3389,30 +3416,6 @@ body.selecting .claims-view {
   text-align: center;
 }
 
-/* Toolbar toggle: shows when the panel is open, and flags a broken account */
-.gmail-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.gmail-toggle[aria-expanded="true"] {
-  background: var(--surface-3);
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-
-.gmail-alert-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--danger);
-}
-
-.gmail-alert-dot[hidden] {
-  display: none;
-}
-
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -3459,12 +3462,6 @@ a.receipt-source-tag:hover {
 }
 
 @media (max-width: 700px) {
-  .gmail-section {
-    margin-bottom: 12px;
-    padding: 12px 14px;
-  }
-
-  .gmail-actions .btn-compact,
   .gmail-account-actions .btn-compact {
     min-height: 40px;
   }
@@ -3475,12 +3472,10 @@ a.receipt-source-tag:hover {
 }
 
 @media (max-width: 420px) {
-  .gmail-actions,
   .gmail-account-actions {
     flex: 1 1 100%;
   }
 
-  .gmail-actions .btn-compact,
   .gmail-account-actions .btn-compact {
     flex: 1;
   }
@@ -3489,7 +3484,7 @@ a.receipt-source-tag:hover {
   min-width: 0;
 }
 
-/* Gmail panel: one-time Google client setup */
+/* Gmail section: one-time Google client setup */
 .gmail-setup {
   margin-bottom: 10px;
   padding: 12px 14px;
@@ -3587,5 +3582,239 @@ a.receipt-source-tag:hover {
 
   .gmail-input {
     font-size: 16px; /* stops iOS zooming into the field */
+  }
+}
+
+/* ---------- Gmail notice (Claims page) ---------------------------------- */
+/* Shown only when a linked account has stopped importing; dismissible. */
+.gmail-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius);
+}
+
+.gmail-notice-text {
+  margin: 0;
+  flex: 1 1 280px;
+  font-size: 0.84rem;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.gmail-notice-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* ---------- Settings dialog -------------------------------------------- */
+.settings-dialog {
+  width: min(600px, calc(100vw - 32px));
+  max-height: min(calc(100vh - 48px), calc(100dvh - 48px));
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  display: none;
+  flex-direction: column;
+}
+
+.settings-dialog[open] {
+  display: flex;
+}
+
+.settings-dialog::backdrop {
+  background: rgba(16, 24, 40, 0.45);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+:root[data-theme="dark"] .settings-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.65);
+}
+
+/* Lock page scroll while the dialog is up */
+:root:has(.settings-dialog[open]) {
+  overflow: hidden;
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 14px 14px 20px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.settings-head h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.settings-close {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-3);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.settings-close svg {
+  width: 18px;
+  height: 18px;
+}
+
+.settings-close:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.settings-body {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  padding: 4px 20px 8px;
+}
+
+/* One block per integration: a head (title, one-line description, optional
+   actions) and a body. Sections stack with a divider between them. */
+.settings-section {
+  padding: 18px 0 20px;
+}
+
+.settings-section + .settings-section {
+  border-top: 1px solid var(--border);
+}
+
+.settings-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px 16px;
+  flex-wrap: wrap;
+}
+
+.settings-section-titles {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.settings-section h3 {
+  margin: 0;
+  font-size: var(--font-size-title);
+  font-weight: 650;
+  color: var(--text);
+  letter-spacing: -0.005em;
+}
+
+.settings-section h3 > span {
+  font-weight: 500;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-section-desc {
+  margin: 3px 0 0;
+  font-size: var(--font-size-meta);
+  color: var(--text-2);
+  line-height: 1.45;
+}
+
+.settings-section-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.settings-section-body {
+  margin-top: 12px;
+}
+
+.settings-section-body:empty {
+  display: none;
+}
+
+.settings-xero-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 0.88rem;
+  color: var(--text-2);
+}
+
+.settings-xero-status strong {
+  color: var(--text);
+}
+
+@media (max-width: 700px) {
+  /* Bottom sheet on phones: full width, pinned to the bottom edge */
+  .settings-dialog {
+    width: 100vw;
+    max-width: 100vw;
+    max-height: calc(100vh - 24px);
+    max-height: calc(100dvh - 24px);
+    margin: auto 0 0;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    border-bottom: none;
+  }
+
+  .settings-head {
+    padding: 12px 10px 12px 16px;
+  }
+
+  .settings-body {
+    padding: 0 16px max(8px, env(safe-area-inset-bottom, 0px));
+  }
+
+  .settings-section {
+    padding: 16px 0 18px;
+  }
+
+  .settings-section-actions {
+    flex: 1 1 100%;
+  }
+
+  .settings-section-actions .btn-compact {
+    flex: 1;
+    min-height: 40px;
+  }
+
+  .settings-close {
+    width: 40px;
+    height: 40px;
+  }
+
+  .gmail-notice {
+    margin-bottom: 12px;
+  }
+
+  .gmail-notice-actions {
+    flex: 1 1 100%;
+    justify-content: flex-end;
+  }
+
+  .gmail-notice-actions .btn-compact,
+  .gmail-notice-actions .btn-refresh {
+    min-height: 40px;
   }
 }

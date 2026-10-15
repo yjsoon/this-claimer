@@ -145,7 +145,11 @@ the checkbox remains the manual override):
 
 The worker can link one or more Gmail accounts (read-only) and import receipts
 into R2 on its own: a cron (`[triggers]` in `wrangler.toml`, every four hours)
-plus a **Scan now** button in the Gmail panel on the Claims page.
+plus a **Scan now** button in the Gmail import section of the Settings dialog
+(gear icon in the header, `upload-app/src/settings.js`). Setup, linked accounts
+and reconnects live there too; the Claims page only shows a quiet "Gmail ·
+checked" line on the receipts column and a dismissible notice when an account
+needs reconnecting. The gear shows a dot whenever an account needs attention.
 
 - PDF/image attachments on emails matching `DEFAULT_RECEIPT_QUERY` in
   `worker/gmail.ts` (override with the `GMAIL_RECEIPT_QUERY` var). Inline

@@ -30,12 +30,13 @@
       document.documentElement.dataset.themePreference = preference;
     })();
   </script>
-  <link rel="stylesheet" href="/style.css?v=20261015-gmail">
+  <link rel="stylesheet" href="/style.css?v=20261015-settings">
   <!-- Preload the module graph so it loads in one round instead of a three-level waterfall -->
-  <link rel="modulepreload" href="/main.js?v=20261015-gmail">
-  <link rel="modulepreload" href="/claims.js?v=20261015-gmail">
-  <link rel="modulepreload" href="/gmail.js?v=20261015-gmail">
-  <link rel="modulepreload" href="/invoices.js?v=20261015-gmail">
+  <link rel="modulepreload" href="/main.js?v=20261015-settings">
+  <link rel="modulepreload" href="/claims.js?v=20261015-settings">
+  <link rel="modulepreload" href="/gmail.js?v=20261015-settings">
+  <link rel="modulepreload" href="/settings.js?v=20261015-settings">
+  <link rel="modulepreload" href="/invoices.js?v=20261015-settings">
   <link rel="modulepreload" href="/lib/constants.js">
   <link rel="modulepreload" href="/lib/core.js">
   <link rel="modulepreload" href="/lib/state.js">
@@ -79,8 +80,20 @@
             </select>
           </label>
           <button
+            id="settingsBtn"
+            class="btn-header-icon btn-settings"
+            type="button"
+            aria-label="Settings"
+            title="Settings"
+            aria-haspopup="dialog"
+            aria-controls="settingsDialog"
+          >
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            <span id="settingsAlert" class="attention-dot" hidden><span class="visually-hidden"> (needs attention)</span></span>
+          </button>
+          <button
             id="themeToggle"
-            class="btn-theme-toggle"
+            class="btn-header-icon btn-theme-toggle"
             type="button"
             aria-label="Colour theme: system. Click to change."
             title="System theme"
@@ -103,49 +116,19 @@
         </p>
       </div>
       <div class="claims-toolbar-actions">
-        <button id="gmailToggleBtn" class="btn-secondary btn-compact gmail-toggle" type="button" aria-expanded="false" aria-controls="gmailSection">Gmail<span id="gmailAlert" class="gmail-alert-dot" hidden><span class="visually-hidden"> (needs attention)</span></span></button>
         <button id="findMatchesBtn" class="btn-secondary btn-compact" type="button">Find matches</button>
         <button id="refreshBtn" class="btn-refresh" type="button">Refresh</button>
       </div>
     </div>
 
-    <section id="gmailSection" class="gmail-section" aria-labelledby="gmailHeading" hidden>
-      <div class="gmail-header">
-        <h2 id="gmailHeading">Gmail import <span id="gmailCount"></span></h2>
-        <div class="gmail-actions">
-          <button id="gmailScanBtn" class="btn-secondary btn-compact" type="button" hidden>Scan now</button>
-          <button id="gmailConnectBtn" class="btn-primary btn-compact" type="button">Link Gmail account</button>
-        </div>
+    <!-- Quiet, dismissible notice when a linked Gmail account has stopped importing -->
+    <div id="gmailNotice" class="gmail-notice" role="status" hidden>
+      <p id="gmailNoticeText" class="gmail-notice-text"></p>
+      <div class="gmail-notice-actions">
+        <button id="gmailNoticeOpen" class="btn-secondary btn-compact" type="button">Open settings</button>
+        <button id="gmailNoticeDismiss" class="btn-refresh" type="button">Dismiss</button>
       </div>
-      <p id="gmailIntro" class="gmail-intro" aria-live="polite">Checking Gmail…</p>
-      <form id="gmailSetup" class="gmail-setup" hidden>
-        <ol class="gmail-setup-steps">
-          <li>In Google Cloud, <a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com" target="_blank" rel="noopener">enable the Gmail API</a> for a project.</li>
-          <li>Under <a href="https://console.cloud.google.com/auth/clients" target="_blank" rel="noopener">Clients</a>, create a <strong>Web application</strong> client with this redirect URI:
-            <span class="gmail-redirect"><code id="gmailRedirectUri"></code><button id="gmailCopyRedirect" class="btn-secondary btn-compact" type="button">Copy</button></span>
-          </li>
-          <li>Under <a href="https://console.cloud.google.com/auth/audience" target="_blank" rel="noopener">Audience</a>, publish the app to production, so sign-ins don't expire after 7 days.</li>
-          <li>Paste the client ID and secret below.</li>
-        </ol>
-        <div class="gmail-setup-fields">
-          <label class="gmail-field">
-            <span>Client ID</span>
-            <input id="gmailClientId" class="gmail-input" type="text" autocomplete="off" spellcheck="false" placeholder="…apps.googleusercontent.com" required>
-          </label>
-          <label class="gmail-field">
-            <span>Client secret</span>
-            <input id="gmailClientSecret" class="gmail-input" type="password" autocomplete="off" spellcheck="false" required>
-          </label>
-        </div>
-        <p id="gmailSetupNote" class="gmail-setup-note" hidden>Accounts linked with the old client will need reconnecting.</p>
-        <div class="gmail-setup-actions">
-          <button id="gmailSetupSave" class="btn-primary btn-compact" type="submit">Save</button>
-          <button id="gmailSetupCancel" class="btn-secondary btn-compact" type="button" hidden>Cancel</button>
-        </div>
-      </form>
-      <ul id="gmailAccountList" class="gmail-account-list"></ul>
-      <p id="gmailClientInfo" class="gmail-client-info" hidden></p>
-    </section>
+    </div>
 
     <section id="matchReviewSection" class="match-review-section" hidden>
       <div class="match-review-header">
@@ -196,7 +179,10 @@
       </div>
 
       <div class="list-column" id="receiptsColumn">
-        <h2>Outstanding Receipts <span id="count">(0)</span></h2>
+        <h2 class="column-title">
+          <span class="column-title-text">Outstanding Receipts <span id="count">(0)</span></span>
+          <button id="gmailReceiptsMeta" class="column-meta" type="button" hidden aria-label="Gmail import status. Opens settings."></button>
+        </h2>
         <ul id="receiptList" class="receipt-list"></ul>
       </div>
     </div>
@@ -230,7 +216,7 @@
     <!-- Invoices view: assemble ready-to-claim items into Xero draft bills -->
     <div id="invoicesView" class="invoices-view" hidden>
       <div class="invoices-bar">
-        <div id="xeroStatus" class="xero-status">Checking Xero…</div>
+        <div id="xeroStatus" class="xero-status" data-xero-status>Checking Xero…</div>
         <div class="invoices-bar-actions">
           <button id="detectGstBtn" class="btn-secondary" type="button" title="Run GST detection on receipts without a verdict yet">Detect GST</button>
           <button id="invoicesRefreshBtn" class="btn-refresh" type="button">Refresh</button>
@@ -253,6 +239,81 @@
       </p>
     </div>
   </div>
+
+  <!-- Settings: integrations and one-time setup, opened from the header gear.
+       Each integration is a .settings-section: a head (h3 title, one-line
+       description, optional actions) and a body. -->
+  <dialog id="settingsDialog" class="settings-dialog" aria-labelledby="settingsTitle">
+    <div class="settings-head">
+      <h2 id="settingsTitle">Settings</h2>
+      <button id="settingsClose" class="settings-close" type="button" aria-label="Close settings">
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="settings-body">
+      <section id="gmailSettingsSection" class="settings-section" aria-labelledby="gmailHeading">
+        <div class="settings-section-head">
+          <div class="settings-section-titles">
+            <h3 id="gmailHeading">Gmail import <span id="gmailCount"></span></h3>
+            <p id="gmailIntro" class="settings-section-desc" aria-live="polite">Checking Gmail…</p>
+          </div>
+          <div class="settings-section-actions">
+            <button id="gmailScanBtn" class="btn-secondary btn-compact" type="button" hidden>Scan now</button>
+            <button id="gmailConnectBtn" class="btn-primary btn-compact" type="button">Link Gmail account</button>
+          </div>
+        </div>
+        <div class="settings-section-body">
+          <form id="gmailSetup" class="gmail-setup" hidden>
+            <ol class="gmail-setup-steps">
+              <li>In Google Cloud, <a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com" target="_blank" rel="noopener">enable the Gmail API</a> for a project.</li>
+              <li>Under <a href="https://console.cloud.google.com/auth/clients" target="_blank" rel="noopener">Clients</a>, create a <strong>Web application</strong> client with this redirect URI:
+                <span class="gmail-redirect"><code id="gmailRedirectUri"></code><button id="gmailCopyRedirect" class="btn-secondary btn-compact" type="button">Copy</button></span>
+              </li>
+              <li>Under <a href="https://console.cloud.google.com/auth/audience" target="_blank" rel="noopener">Audience</a>, publish the app to production, so sign-ins don't expire after 7 days.</li>
+              <li>Paste the client ID and secret below.</li>
+            </ol>
+            <div class="gmail-setup-fields">
+              <label class="gmail-field">
+                <span>Client ID</span>
+                <input id="gmailClientId" class="gmail-input" type="text" autocomplete="off" spellcheck="false" placeholder="…apps.googleusercontent.com" required>
+              </label>
+              <label class="gmail-field">
+                <span>Client secret</span>
+                <input id="gmailClientSecret" class="gmail-input" type="password" autocomplete="off" spellcheck="false" required>
+              </label>
+            </div>
+            <p id="gmailSetupNote" class="gmail-setup-note" hidden>Accounts linked with the old client will need reconnecting.</p>
+            <div class="gmail-setup-actions">
+              <button id="gmailSetupSave" class="btn-primary btn-compact" type="submit">Save</button>
+              <button id="gmailSetupCancel" class="btn-secondary btn-compact" type="button" hidden>Cancel</button>
+            </div>
+          </form>
+          <ul id="gmailAccountList" class="gmail-account-list"></ul>
+          <p id="gmailClientInfo" class="gmail-client-info" hidden></p>
+        </div>
+      </section>
+
+      <section id="xeroSettingsSection" class="settings-section" aria-labelledby="xeroSettingsHeading">
+        <div class="settings-section-head">
+          <div class="settings-section-titles">
+            <h3 id="xeroSettingsHeading">Xero</h3>
+            <p class="settings-section-desc">Draft bills from the Invoices tab are created in this organisation.</p>
+          </div>
+        </div>
+        <div class="settings-section-body">
+          <div class="settings-xero-status" data-xero-status aria-live="polite">Checking Xero…</div>
+        </div>
+      </section>
+
+      <!-- Mount point for AI provider keys (rendered by its own module). Fill it
+           with the same structure as the sections above:
+             .settings-section-head  >  .settings-section-titles (h3 + p.settings-section-desc)
+                                        [+ .settings-section-actions]
+             .settings-section-body  >  the form or list
+           Then remove the hidden attribute. -->
+      <section id="aiSettingsSection" class="settings-section" hidden></section>
+    </div>
+  </dialog>
 
   <!-- Status toast: fixed so it never shifts the layout -->
   <div id="status" class="status" role="status" aria-live="polite"></div>
@@ -283,6 +344,6 @@
     </div>
   </div>
 
-  <script type="module" src="/main.js?v=20261015-gmail"></script>
+  <script type="module" src="/main.js?v=20261015-settings"></script>
 </body>
 </html>

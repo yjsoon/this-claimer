@@ -6,22 +6,28 @@ import {
   loadReceipts,
   loadYnabTodos,
   setOnClaimsLoadError,
-} from './claims.js?v=20261015-gmail';
-import { initGmail, loadGmailStatus, setOnGmailImported } from './gmail.js?v=20261015-gmail';
+} from './claims.js?v=20261015-settings';
+import { initGmail, loadGmailStatus, setOnGmailImported } from './gmail.js?v=20261015-settings';
+import { initSettings } from './settings.js?v=20261015-settings';
 import {
   initInvoices,
   showInvoicesView,
   isInvoicesPath,
+  loadXeroStatus,
   navigateToMode,
   renderInvoiceClaimLoadError,
   renderInvoicesFromLoadedData,
-} from './invoices.js?v=20261015-gmail';
+} from './invoices.js?v=20261015-settings';
 
 initTheme();
 initPreview();
 initAuthUi();
 initClaims();
 initInvoices();
+// Settings must exist before Gmail, which opens it after the OAuth callback.
+initSettings({
+  onOpen: () => Promise.allSettled([loadGmailStatus(), loadXeroStatus()]),
+});
 initGmail();
 setOnGmailImported(() => loadReceipts());
 setOnClaimsLoadError(renderInvoiceClaimLoadError);
