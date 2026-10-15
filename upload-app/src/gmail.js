@@ -1,12 +1,12 @@
-// Gmail receipt import panel on the Claims page: link Gmail accounts, see
-// when each was last checked, and trigger a scan. The worker also scans on a
-// schedule (see worker/gmail.ts), so this panel is mostly for setup.
+// Gmail import section of the Settings dialog: link Gmail accounts, see when
+// each was last checked, and trigger a scan. The worker scans on a schedule
+// (see worker/gmail.ts), so day to day this is a settings concern; the Claims
+// page only shows a quiet status line and, when an account breaks, a notice.
 import { API_BASE } from './lib/constants.js';
 import { authHeaders, escapeHtml, showStatus } from './lib/core.js';
+import { openSettings, setSettingsAttention } from './settings.js?v=20261015-settings';
 
-const section = document.getElementById('gmailSection');
-const toggleBtn = document.getElementById('gmailToggleBtn');
-const alertDot = document.getElementById('gmailAlert');
+const section = document.getElementById('gmailSettingsSection');
 const countEl = document.getElementById('gmailCount');
 const accountList = document.getElementById('gmailAccountList');
 const intro = document.getElementById('gmailIntro');
@@ -21,6 +21,13 @@ const setupSaveBtn = document.getElementById('gmailSetupSave');
 const setupCancelBtn = document.getElementById('gmailSetupCancel');
 const setupNote = document.getElementById('gmailSetupNote');
 const clientInfo = document.getElementById('gmailClientInfo');
+const notice = document.getElementById('gmailNotice');
+const noticeText = document.getElementById('gmailNoticeText');
+const noticeOpenBtn = document.getElementById('gmailNoticeOpen');
+const noticeDismissBtn = document.getElementById('gmailNoticeDismiss');
+const receiptsMeta = document.getElementById('gmailReceiptsMeta');
+
+const NOTICE_DISMISSED_KEY = 'claim_manager_gmail_notice_dismissed';
 
 const LINK_ERRORS = {
   access_denied: "Gmail wasn't linked. You cancelled or didn't allow access.",
@@ -30,7 +37,6 @@ const LINK_ERRORS = {
 
 let onImported = () => {};
 let scanning = false;
-let openedForAttention = false;
 let editingClient = false;
 let lastStatus = null;
 
@@ -110,6 +116,58 @@ function shortClientId(id = '') {
   return prefix.length > 16 ? `${prefix.slice(0, 12)}…` : prefix;
 }
 
+// Which broken accounts the user has already dismissed a notice for, so the
+// same problem does not nag on every page load within a session.
+function dismissedNotice() {
+  try {
+    return sessionStorage.getItem(NOTICE_DISMISSED_KEY) || '';
+  } catch (_err) {
+    return '';
+  }
+}
+
+function rememberNoticeDismissed(key) {
+  try {
+    sessionStorage.setItem(NOTICE_DISMISSED_KEY, key);
+  } catch (_err) {
+    /* private mode: the notice simply comes back next load */
+  }
+}
+
+// The Claims page gets two passive signals: a notice when an account has
+// stopped importing, and a quiet "checked at" line on the receipts column.
+function renderPageSignals(accounts) {
+  const broken = accounts.filter((a) => a.needsReconnect || a.lastScanError);
+  const brokenKey = broken.map((a) => a.email).sort().join(',');
+
+  if (broken.length && brokenKey !== dismissedNotice()) {
+    const one = broken.length === 1;
+    noticeText.textContent = one
+      ? `Gmail import has stopped for ${broken[0].email}. Reconnect it in Settings to keep importing receipts.`
+      : `Gmail import has stopped for ${broken.length} accounts. Reconnect them in Settings to keep importing receipts.`;
+    notice.dataset.key = brokenKey;
+    notice.hidden = false;
+  } else {
+    notice.hidden = true;
+  }
+
+  if (!accounts.length) {
+    receiptsMeta.hidden = true;
+    receiptsMeta.textContent = '';
+    return;
+  }
+  const latest = accounts
+    .map((a) => a.lastScanAt)
+    .filter(Boolean)
+    .sort()
+    .pop();
+  receiptsMeta.classList.toggle('is-error', broken.length > 0);
+  receiptsMeta.textContent = broken.length
+    ? 'Gmail · needs attention'
+    : latest ? `Gmail · checked ${formatWhen(latest)}` : 'Gmail · not checked yet';
+  receiptsMeta.hidden = false;
+}
+
 function renderStatus(data) {
   lastStatus = data;
   renderSetup(data);
@@ -129,8 +187,8 @@ function renderStatus(data) {
   connectBtn.disabled = scanning;
   scanBtn.disabled = scanning;
   countEl.textContent = accounts.length ? `(${accounts.length})` : '';
-  alertDot.hidden = !needsAttention;
-  toggleBtn.classList.toggle('needs-attention', needsAttention);
+  setSettingsAttention('gmail', needsAttention);
+  renderPageSignals(accounts);
 
   if (!data.configured) {
     accountList.innerHTML = '';
@@ -148,12 +206,6 @@ function renderStatus(data) {
     btn.disabled = scanning;
     btn.addEventListener('click', connect);
   });
-
-  // A broken account should not go unnoticed behind a closed panel.
-  if (needsAttention && !openedForAttention) {
-    openedForAttention = true;
-    setOpen(true);
-  }
 }
 
 export async function loadGmailStatus() {
@@ -276,13 +328,7 @@ async function scanNow() {
   }
 }
 
-function setOpen(open) {
-  section.hidden = !open;
-  toggleBtn.setAttribute('aria-expanded', String(open));
-}
-
 export function initGmail() {
-  toggleBtn.addEventListener('click', () => setOpen(section.hidden));
   connectBtn.addEventListener('click', connect);
   scanBtn.addEventListener('click', scanNow);
   setupForm.addEventListener('submit', saveClient);
@@ -294,12 +340,20 @@ export function initGmail() {
     if (lastStatus) renderStatus(lastStatus);
   });
 
-  // Back from Google's consent screen: open the panel, report, tidy the URL.
+  noticeOpenBtn.addEventListener('click', () => openSettings({ focus: '.gmail-reconnect-btn' }));
+  noticeDismissBtn.addEventListener('click', () => {
+    rememberNoticeDismissed(notice.dataset.key || '');
+    notice.hidden = true;
+  });
+  receiptsMeta.addEventListener('click', () => openSettings());
+
+  // Back from Google's consent screen: open Settings so the result is in view,
+  // report, and tidy the URL.
   const params = new URLSearchParams(location.search);
   const linked = params.get('gmail');
   const linkError = params.get('gmailError');
   if (linked || linkError) {
-    setOpen(true);
+    openSettings();
     if (linked) {
       showStatus('success', `Linked ${linked}. New receipts will appear after the next check, or use Scan now.`);
     } else {
