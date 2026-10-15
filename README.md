@@ -1,6 +1,6 @@
-# Claim Manager
+# This Claimer
 
-Expense claim management system with HowMuch/YNAB integration and Cloudflare R2 storage.
+Expense claim management system with HowMuch/YNAB integration and Cloudflare R2 storage. (Formerly "Claim Manager" and `ynab-claimer`.)
 
 ## Features
 
