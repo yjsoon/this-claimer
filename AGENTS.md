@@ -22,7 +22,7 @@ The `.env` file contains secrets. When writing documentation or examples, always
 - `.agents/skills/claim-invoices/SKILL.md` - Agent mirror of the claim-invoices skill
 - `upload-app/worker/xero.ts` - Xero OAuth + bill creation/attachment for the Invoices tab
 - `upload-app/worker/gmail.ts` - Gmail OAuth (multiple accounts) + scheduled receipt import
-- `upload-app/worker/ai.ts` - AI keys/settings stored from the app, Claude receipt reading and Ask Claude matching
+- `upload-app/worker/ai.ts` - AI keys/settings stored from the app, Claude receipt reading and Claude-assisted matching
 - `.env` - Local config (gitignored)
 - `.env.example` - Template with placeholders (safe to commit)
 
@@ -34,7 +34,7 @@ Local config lives in `.env` (gitignored); `.env.example` is the committed templ
 - `YNAB_BUDGET_ID` — from the YNAB URL when viewing the budget
 - `GEMINI_API_KEY` — for receipt amount tagging
 - `GEMINI_MODEL` — optional override (worker default: `gemini-3-flash-preview`)
-- `ANTHROPIC_API_KEY` — optional, for Claude receipt reading and Ask Claude (can be set in the app's AI settings instead)
+- `ANTHROPIC_API_KEY` — optional, for Claude receipt reading and Claude-assisted matching (can be set in the app's AI settings instead)
 - `R2_WORKER_URL` — deployed receipt-upload worker URL
 - `R2_PASSWORD` — receipt worker auth token (must match the worker's `AUTH_PASSWORD` secret)
 - `VOLOPAY_URL` — your company's Volopay subdomain
@@ -149,12 +149,13 @@ over the matching Worker secret, and removing it falls back to the secret. The
 dialog also sets the first receipt-reading provider and the Claude model, which
 override `VISION_PROVIDER` / `CLAUDE_MODEL`. Routes: `GET|PUT /ai/settings`.
 
-**Ask Claude** (Claims toolbar, shown once a Claude key is set) sends the
-outstanding claims and unlinked receipts that the exact-match rules don't
-already pair (`POST /ai/match`, capped at 150 claims / 250 receipts) and shows
-Claude's pairs in Match review with a "Claude" chip and its reason. Nothing is
-linked until the user accepts a suggestion; Claude's pick replaces an
-ambiguous rule suggestion for the same claim but never a clear one.
+With a Claude key set, **Find matches** runs the exact rules and then sends the
+outstanding claims and unlinked receipts the rules didn't clearly pair to
+Claude (`POST /ai/match`, capped at 150 claims / 250 receipts). Claude's pairs
+show in Match review with a "Claude" chip and its reason. Nothing is linked
+until the user accepts a suggestion; Claude's pick replaces an ambiguous rule
+suggestion for the same claim but never a clear one. Without a Claude key, or
+if the call fails, Find matches shows the exact matches only.
 
 The GST checkbox on each invoice line defaults from the AI verdict stored on
 the receipt (`taggedGstShown` / `taggedGstAmount` / `taggedGstSource` metadata;

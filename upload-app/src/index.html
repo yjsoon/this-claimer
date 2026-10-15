@@ -109,7 +109,6 @@
       <div class="claims-toolbar-actions">
         <button id="gmailToggleBtn" class="btn-secondary btn-compact gmail-toggle" type="button" aria-expanded="false" aria-controls="gmailSection">Gmail<span id="gmailAlert" class="gmail-alert-dot" hidden><span class="visually-hidden"> (needs attention)</span></span></button>
         <button id="findMatchesBtn" class="btn-secondary btn-compact" type="button">Find matches</button>
-        <button id="askClaudeBtn" class="btn-secondary btn-compact" type="button" hidden title="Ask Claude to pair claims with receipts the exact-match rules miss">Ask Claude</button>
         <button id="refreshBtn" class="btn-refresh" type="button">Refresh</button>
       </div>
     </div>
@@ -307,7 +306,7 @@
         <label class="gmail-field">
           Claude model
           <select id="aiClaudeModel"></select>
-          <span class="ai-choice-hint">Used for reading receipts with Claude and for Ask Claude.</span>
+          <span class="ai-choice-hint">Used when Claude reads receipts and when Find matches asks Claude.</span>
         </label>
       </div>
       <p id="aiDialogMessage" class="ai-dialog-message" role="status" aria-live="polite"></p>

@@ -45,7 +45,7 @@ import {
   makeSuggestionPairId,
 } from './lib/match.js';
 import { openPreview } from './lib/preview.js?v=20260914-preview-review';
-import { isClaudeConfigured, onAiStatusChange } from './ai.js?v=20261015-ai';
+import { isClaudeConfigured } from './ai.js?v=20261015-ai';
 
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
@@ -53,7 +53,6 @@ const receiptList = document.getElementById('receiptList');
 const countSpan = document.getElementById('count');
 const refreshBtn = document.getElementById('refreshBtn');
 const findMatchesBtn = document.getElementById('findMatchesBtn');
-const askClaudeBtn = document.getElementById('askClaudeBtn');
 const matchReviewSection = document.getElementById('matchReviewSection');
 const matchReviewList = document.getElementById('matchReviewList');
 const matchReviewCount = document.getElementById('matchReviewCount');
@@ -1004,29 +1003,40 @@ function claudeMatchPayload() {
   return { claims, receipts };
 }
 
-function updateAskClaudeButton() {
-  if (!askClaudeBtn) return;
-  askClaudeBtn.hidden = !isClaudeConfigured();
-  askClaudeBtn.disabled = claudeMatchInFlight;
-  askClaudeBtn.textContent = claudeMatchInFlight ? 'Asking Claude…' : 'Ask Claude';
+function setFindMatchesBusy(busy) {
+  if (!findMatchesBtn) return;
+  findMatchesBtn.disabled = busy;
+  findMatchesBtn.textContent = busy ? 'Asking Claude…' : 'Find matches';
 }
 
-async function askClaudeForMatches() {
+function ruleMatchSummary() {
+  const clearCount = matchSuggestions.filter((item) => item.kind === 'clear').length;
+  const ambiguousCount = matchSuggestions.filter((item) => item.kind === 'ambiguous').length;
+  return clearCount || ambiguousCount ? `${clearCount} clear, ${ambiguousCount} ambiguous` : '';
+}
+
+// Find matches runs the exact rules; with a Claude key set it then asks
+// Claude about whatever the rules left unpaired.
+async function findMatches() {
   if (claudeMatchInFlight) return;
+  if (!isClaudeConfigured()) {
+    refreshMatchSuggestions({ announce: true });
+    return;
+  }
   if (!receiptsLoadSucceeded || claimsLoadErrorMessage || claimsData.length === 0) {
-    showStatus('error', claimsLoadErrorMessage || 'No claims loaded yet');
+    refreshMatchSuggestions({ announce: true });
     return;
   }
   refreshMatchSuggestions({ announce: false });
   const payload = claudeMatchPayload();
   if (payload.claims.length === 0 || payload.receipts.length === 0) {
-    showStatus('success', 'Nothing left for Claude to match');
+    refreshMatchSuggestions({ announce: true });
     return;
   }
 
   claudeMatchInFlight = true;
-  updateAskClaudeButton();
-  showStatus('uploading', `Asking Claude about ${payload.claims.length} claim${payload.claims.length === 1 ? '' : 's'}…`);
+  setFindMatchesBusy(true);
+  showStatus('uploading', `Asking Claude about ${payload.claims.length} unmatched claim${payload.claims.length === 1 ? '' : 's'}…`);
   try {
     const res = await fetch(`${API_BASE}/ai/match`, {
       method: 'POST',
@@ -1040,15 +1050,18 @@ async function askClaudeForMatches() {
     claudeMatches = claudeMatches.filter((m) => !fresh.has(m.claimId)).concat(matches);
     setMatchReviewCollapsed(false);
     refreshMatchSuggestions({ announce: false });
-    const shown = matchSuggestions.filter((item) => item.kind === 'claude').length;
-    showStatus('success', shown
-      ? `Claude suggested ${shown} match${shown === 1 ? '' : 'es'} to review`
-      : 'Claude found no confident matches');
+    const fromClaude = matchSuggestions.filter((item) => item.kind === 'claude').length;
+    const parts = [ruleMatchSummary(), fromClaude ? `${fromClaude} from Claude` : ''].filter(Boolean);
+    showStatus('success', parts.length
+      ? `Found ${matchSuggestions.length} suggestion${matchSuggestions.length === 1 ? '' : 's'} (${parts.join(', ')})`
+      : 'No matches found');
   } catch (err) {
-    showStatus('error', err instanceof Error && !/^HTTP /.test(err.message) ? err.message : 'Ask Claude failed. Try again.');
+    refreshMatchSuggestions({ announce: false });
+    const reason = err instanceof Error && !/^HTTP /.test(err.message) ? err.message : "Claude couldn't be reached.";
+    showStatus('error', `${reason} Showing exact matches only.`);
   } finally {
     claudeMatchInFlight = false;
-    updateAskClaudeButton();
+    setFindMatchesBusy(false);
   }
 }
 
@@ -1625,15 +1638,8 @@ refreshBtn.addEventListener('click', async () => {
 
 if (findMatchesBtn) {
   findMatchesBtn.addEventListener('click', () => {
-    refreshMatchSuggestions({ announce: true });
+    findMatches();
   });
-}
-
-if (askClaudeBtn) {
-  askClaudeBtn.addEventListener('click', () => {
-    askClaudeForMatches();
-  });
-  onAiStatusChange(updateAskClaudeButton);
 }
 
 if (acceptAllClearBtn) {

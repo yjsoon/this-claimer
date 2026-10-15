@@ -1,4 +1,4 @@
-// Browser test for the AI settings dialog and Ask Claude matching, against a
+// Browser test for the AI settings dialog and Claude-assisted Find matches, against a
 // mocked API. Set SCREENSHOT_DIR to also save screenshots.
 const http = require('http');
 const fs = require('fs');
@@ -114,8 +114,10 @@ async function run(browser, { viewport, colorScheme, name, full }) {
   });
 
   await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'networkidle' });
-  const askClaude = page.getByRole('button', { name: 'Ask Claude' });
-  assert.equal(await askClaude.isVisible(), false, 'Ask Claude stays hidden without a Claude key');
+  const findMatches = page.getByRole('button', { name: 'Find matches' });
+  await findMatches.click();
+  await page.getByText('Found 1 suggestion (1 clear, 0 ambiguous)').waitFor();
+  assert.equal(matchRequests.length, 0, 'Find matches must not call Claude without a Claude key');
 
   // Settings dialog: add a Claude key (a rejected one first).
   await page.getByRole('button', { name: 'AI settings' }).click();
@@ -143,7 +145,6 @@ async function run(browser, { viewport, colorScheme, name, full }) {
     page.once('dialog', (d) => d.accept());
     await dialog.getByRole('button', { name: 'Remove Claude (Anthropic) key' }).click();
     await dialog.getByText('Removed the Claude (Anthropic) key.').waitFor();
-    assert.equal(await askClaude.isVisible(), false, 'Ask Claude hides again once the key is gone');
     await dialog.getByRole('button', { name: 'Add Claude (Anthropic) key' }).click();
     await dialog.getByLabel('Claude (Anthropic) API key').fill('sk-ant-api03-test-key-abcd');
     await dialog.getByRole('button', { name: 'Save' }).click();
@@ -152,9 +153,9 @@ async function run(browser, { viewport, colorScheme, name, full }) {
   await dialog.getByRole('button', { name: 'Done' }).click();
   assert.equal(await dialog.isVisible(), false);
 
-  // Ask Claude: only the claims and receipts the rules leave unmatched are sent.
-  await askClaude.waitFor();
-  await askClaude.click();
+  // With a Claude key, Find matches also asks Claude, sending only the claims
+  // and receipts the rules leave unmatched.
+  await findMatches.click();
   const review = page.locator('#matchReviewList');
   await review.locator('.match-review-chip.claude').first().waitFor();
   const payload = matchRequests.at(-1);
@@ -163,6 +164,7 @@ async function run(browser, { viewport, colorScheme, name, full }) {
   assert.equal(await review.locator('.match-review-chip.claude').count(), 2);
   assert.equal(await review.locator('.match-review-chip.clear').count(), 1);
   await review.getByText('USD 25 ChatGPT receipt').waitFor();
+  await page.getByText('Found 3 suggestions (1 clear, 0 ambiguous, 2 from Claude)').waitFor();
   if (shots) await page.screenshot({ path: path.join(shots, `${name}-matches.png`), fullPage: true });
 
   if (full) {
@@ -188,7 +190,7 @@ async function main() {
     await run(browser, { viewport: { width: 1280, height: 860 }, colorScheme: 'light', name: 'desktop', full: true });
     await run(browser, { viewport: { width: 1280, height: 860 }, colorScheme: 'dark', name: 'desktop-dark' });
     await run(browser, { viewport: { width: 390, height: 844 }, colorScheme: 'light', name: 'mobile' });
-    console.log('AI settings + Ask Claude browser test passed');
+    console.log('AI settings + Claude matching browser test passed');
   } finally {
     await browser.close();
     server.close();
