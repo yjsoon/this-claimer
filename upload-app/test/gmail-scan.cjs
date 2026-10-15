@@ -188,6 +188,23 @@ async function main() {
   assert.ok(flakyState.seenIds.includes('m1'));
   assert.ok(flakyState.lastCompleteScanAt > 0);
 
+  // If the second attachment of an email fails, the retry imports only that one.
+  const partialEnv = { ...plainEnv, GMAIL_STATE: memoryKv() };
+  await gmail.exchangeCode(partialEnv, 'https://receipts.example/gmail/callback', 'c');
+  const firstTry = [];
+  await gmail.scanAll(partialEnv, async (file) => {
+    if (file.filename === 'photo.jpg') throw new Error('R2 unavailable');
+    firstTry.push(file.filename);
+    return { key: 'k' };
+  });
+  assert.deepEqual(firstTry, ['receipt-1.pdf']);
+  const secondTry = [];
+  await gmail.scanAll(partialEnv, async (file) => {
+    secondTry.push(file.filename);
+    return { key: 'k' };
+  });
+  assert.deepEqual(secondTry, ['photo.jpg']);
+
   // A revoked refresh token flags the account for reconnecting.
   const revokedEnv = { ...plainEnv, GMAIL_STATE: memoryKv() };
   await gmail.exchangeCode(revokedEnv, 'https://receipts.example/gmail/callback', 'c');

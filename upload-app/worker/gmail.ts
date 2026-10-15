@@ -33,6 +33,10 @@ const SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
 
 const ACCOUNTS_KEY = 'gmail_accounts';
 const LOCK_KEY = 'gmail_scan_lock';
+// Attachments already imported from a message that has not finished yet, so a
+// retry after a later attachment fails doesn't import the earlier ones twice.
+const PARTS_DONE_PREFIX = 'gmail_parts_done:';
+const PARTS_DONE_TTL_SECONDS = 30 * 86400;
 const EXPIRY_BUFFER_SECONDS = 120;
 const MAX_SEEN_IDS = 1500;
 // Messages fetched in full per account per scan. Anything beyond waits for the
@@ -596,7 +600,12 @@ async function importAttachments(ctx: ScanContext, messageId: string): Promise<v
     if (receiptFileType(part)) files.push(part);
   });
 
-  for (const part of files) {
+  const doneKey = `${PARTS_DONE_PREFIX}${ctx.account.email}:${messageId}`;
+  const done: string[] = files.length > 1 ? JSON.parse((await ctx.env.GMAIL_STATE.get(doneKey)) || '[]') : [];
+
+  for (const [index, part] of files.entries()) {
+    const partKey = part.partId || String(index);
+    if (done.includes(partKey)) continue;
     const mimeType = receiptFileType(part) as string;
     const attachment = await gmailFetch<{ data?: string }>(
       ctx.accessToken,
@@ -616,6 +625,10 @@ async function importAttachments(ctx: ScanContext, messageId: string): Promise<v
       ctx.result.imported.push({ key: outcome.key, filename: part.filename || '', subject });
     } else {
       ctx.result.errors.push(`${part.filename}: ${outcome.error}`);
+    }
+    if (files.length > 1) {
+      done.push(partKey);
+      await ctx.env.GMAIL_STATE.put(doneKey, JSON.stringify(done), { expirationTtl: PARTS_DONE_TTL_SECONDS });
     }
   }
 }
