@@ -45,6 +45,7 @@ import {
   makeSuggestionPairId,
 } from './lib/match.js';
 import { openPreview } from './lib/preview.js?v=20260914-preview-review';
+import { isClaudeConfigured, onAiStatusChange } from './ai.js?v=20261015-ai';
 
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
@@ -52,6 +53,7 @@ const receiptList = document.getElementById('receiptList');
 const countSpan = document.getElementById('count');
 const refreshBtn = document.getElementById('refreshBtn');
 const findMatchesBtn = document.getElementById('findMatchesBtn');
+const askClaudeBtn = document.getElementById('askClaudeBtn');
 const matchReviewSection = document.getElementById('matchReviewSection');
 const matchReviewList = document.getElementById('matchReviewList');
 const matchReviewCount = document.getElementById('matchReviewCount');
@@ -113,6 +115,7 @@ if (claimsBackendSelect) {
     setClaimsData([]);
     clearSelection();
     matchSuggestions = [];
+    claudeMatches = [];
     renderMatchReview();
     renderOutstandingClaims();
     renderLinkedPairs();
@@ -125,6 +128,10 @@ if (claimsBackendSelect) {
   });
 }
 let matchSuggestions = [];
+// Pairs Claude suggested ({ claimId, receiptKey, confidence, reason }); kept
+// across rebuilds until linked, dismissed, or the backend changes.
+let claudeMatches = [];
+let claudeMatchInFlight = false;
 let matchSuggestionRefreshTimer = null;
 let matchAcceptInFlight = false;
 let rejectedMatchPairs = loadRejectedMatchPairs();
@@ -891,6 +898,7 @@ function refreshMatchSuggestions({ announce = false } = {}) {
     rejectedPairs: rejectedMatchPairs,
   })
     .filter((suggestion) => !claimMatchesHideFilter(suggestion.claim, filterTerms));
+  mergeClaudeSuggestions(filterTerms);
   renderMatchReview();
 
   if (!announce) return;
@@ -908,6 +916,140 @@ function refreshMatchSuggestions({ announce = false } = {}) {
     `Found ${matchSuggestions.length} suggestion${matchSuggestions.length === 1 ? '' : 's'}` +
       ` (${clearCount} clear, ${ambiguousCount} ambiguous)`
   );
+}
+
+// Claude's picks sit after the rule-based ones. A clear rule match always
+// wins; for a claim the rules found ambiguous, Claude's pick replaces the guess.
+function mergeClaudeSuggestions(filterTerms) {
+  if (claudeMatches.length === 0) return;
+  const outstanding = new Map(getOutstandingClaims().map((claim) => [claim.id, claim]));
+  const unlinked = new Map(
+    receiptsData.filter((receipt) => getLinkedClaimIds(receipt).length === 0).map((receipt) => [receipt.key, receipt])
+  );
+  const clear = matchSuggestions.filter((item) => item.kind === 'clear');
+  const clearClaimIds = new Set(clear.map((item) => item.claim.id));
+  const clearReceiptKeys = new Set(clear.map((item) => item.receipt.key));
+
+  const additions = [];
+  claudeMatches = claudeMatches.filter((match) => {
+    const claim = outstanding.get(match.claimId);
+    const receipt = unlinked.get(match.receiptKey);
+    if (!claim || !receipt) return false;
+    const id = makeSuggestionPairId(claim.id, receipt.key);
+    if (rejectedMatchPairs.has(id)) return false;
+    if (clearClaimIds.has(claim.id) || clearReceiptKeys.has(receipt.key)) return true;
+    if (claimMatchesHideFilter(claim, filterTerms)) return true;
+    additions.push({
+      id,
+      kind: 'claude',
+      claim,
+      receipt,
+      reason: match.reason,
+      confidence: match.confidence,
+      alternatives: [],
+    });
+    return true;
+  });
+  if (additions.length === 0) return;
+
+  const claudeClaimIds = new Set(additions.map((item) => item.claim.id));
+  const claudeReceiptKeys = new Set(additions.map((item) => item.receipt.key));
+  matchSuggestions = matchSuggestions
+    .filter((item) => item.kind === 'clear' || (!claudeClaimIds.has(item.claim.id) && !claudeReceiptKeys.has(item.receipt.key)))
+    .concat(additions);
+}
+
+function claudeMatchPayload() {
+  const clear = matchSuggestions.filter((item) => item.kind === 'clear');
+  const clearClaimIds = new Set(clear.map((item) => item.claim.id));
+  const clearReceiptKeys = new Set(clear.map((item) => item.receipt.key));
+  const byDateDesc = (a, b) => String(b.date || '').localeCompare(String(a.date || ''));
+
+  const claims = getOutstandingClaims()
+    .filter((claim) => !clearClaimIds.has(claim.id) && !claimMatchesHideFilter(claim, getClaimFilterTerms()))
+    .map((claim) => ({
+      id: claim.id,
+      date: claim.date,
+      amount: Number(claim.amount),
+      payee: claim.payee,
+      description: claim.description,
+    }))
+    .filter((claim) => Number.isFinite(claim.amount))
+    .sort(byDateDesc)
+    .slice(0, 150);
+
+  const receipts = receiptsData
+    .filter((receipt) => getLinkedClaimIds(receipt).length === 0 && !clearReceiptKeys.has(receipt.key))
+    .map((receipt) => {
+      const { date } = getReceiptMatchDate(receipt);
+      const amount = Number(receipt.taggedAmount);
+      const sgd = Number(receipt.taggedAmountSgdApprox);
+      return {
+        key: receipt.key,
+        filename: getReceiptDisplayName(receipt),
+        uploaded: receipt.uploaded,
+        receiptDate: receipt.receiptDate || receipt.detectedReceiptDate || undefined,
+        amount: Number.isFinite(amount) ? amount : undefined,
+        currency: receipt.taggedCurrency || undefined,
+        amountSgdApprox: Number.isFinite(sgd) ? sgd : undefined,
+        vendor: receipt.taggedVendor || undefined,
+        purpose: receipt.taggedPurpose || undefined,
+        date: date ? date.toISOString().slice(0, 10) : '',
+      };
+    })
+    .sort(byDateDesc)
+    .slice(0, 250)
+    .map(({ date, ...receipt }) => receipt);
+
+  return { claims, receipts };
+}
+
+function updateAskClaudeButton() {
+  if (!askClaudeBtn) return;
+  askClaudeBtn.hidden = !isClaudeConfigured();
+  askClaudeBtn.disabled = claudeMatchInFlight;
+  askClaudeBtn.textContent = claudeMatchInFlight ? 'Asking Claude…' : 'Ask Claude';
+}
+
+async function askClaudeForMatches() {
+  if (claudeMatchInFlight) return;
+  if (!receiptsLoadSucceeded || claimsLoadErrorMessage || claimsData.length === 0) {
+    showStatus('error', claimsLoadErrorMessage || 'No claims loaded yet');
+    return;
+  }
+  refreshMatchSuggestions({ announce: false });
+  const payload = claudeMatchPayload();
+  if (payload.claims.length === 0 || payload.receipts.length === 0) {
+    showStatus('success', 'Nothing left for Claude to match');
+    return;
+  }
+
+  claudeMatchInFlight = true;
+  updateAskClaudeButton();
+  showStatus('uploading', `Asking Claude about ${payload.claims.length} claim${payload.claims.length === 1 ? '' : 's'}…`);
+  try {
+    const res = await fetch(`${API_BASE}/ai/match`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    const matches = Array.isArray(data.matches) ? data.matches : [];
+    const fresh = new Set(matches.map((m) => m.claimId));
+    claudeMatches = claudeMatches.filter((m) => !fresh.has(m.claimId)).concat(matches);
+    setMatchReviewCollapsed(false);
+    refreshMatchSuggestions({ announce: false });
+    const shown = matchSuggestions.filter((item) => item.kind === 'claude').length;
+    showStatus('success', shown
+      ? `Claude suggested ${shown} match${shown === 1 ? '' : 'es'} to review`
+      : 'Claude found no confident matches');
+  } catch (err) {
+    showStatus('error', err instanceof Error && !/^HTTP /.test(err.message) ? err.message : 'Ask Claude failed. Try again.');
+  } finally {
+    claudeMatchInFlight = false;
+    updateAskClaudeButton();
+  }
 }
 
 function renderMatchReview() {
@@ -938,12 +1080,15 @@ function renderMatchReview() {
     const claimDate = formatDateForLocale(parseDateOnly(suggestion.claim.date) || new Date(suggestion.claim.date));
     const claimLabel = (suggestion.claim.description || suggestion.claim.payee || 'Claim').trim();
     const receiptName = getReceiptDisplayName(suggestion.receipt);
-    const reason = describeMatchReason(suggestion);
+    const isClaude = suggestion.kind === 'claude';
+    const reason = isClaude ? suggestion.reason || 'Suggested by Claude' : describeMatchReason(suggestion);
     const altCount = suggestion.alternatives.length;
-    const chipClass = suggestion.kind === 'clear' ? 'clear' : 'ambiguous';
-    const chipLabel = suggestion.kind === 'clear'
-      ? 'Clear'
-      : (altCount > 0 ? `Best of ${altCount + 1}` : 'Ambiguous');
+    const chipClass = isClaude ? 'claude' : (suggestion.kind === 'clear' ? 'clear' : 'ambiguous');
+    const chipLabel = isClaude
+      ? 'Claude'
+      : suggestion.kind === 'clear'
+        ? 'Clear'
+        : (altCount > 0 ? `Best of ${altCount + 1}` : 'Ambiguous');
     const altNote = altCount > 0
       ? `<p class="match-review-alt">${altCount} other receipt${altCount === 1 ? ' also matches' : 's also match'} — use Change to pick</p>`
       : (suggestion.kind === 'ambiguous'
@@ -1482,6 +1627,13 @@ if (findMatchesBtn) {
   findMatchesBtn.addEventListener('click', () => {
     refreshMatchSuggestions({ announce: true });
   });
+}
+
+if (askClaudeBtn) {
+  askClaudeBtn.addEventListener('click', () => {
+    askClaudeForMatches();
+  });
+  onAiStatusChange(updateAskClaudeButton);
 }
 
 if (acceptAllClearBtn) {

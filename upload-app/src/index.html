@@ -30,12 +30,13 @@
       document.documentElement.dataset.themePreference = preference;
     })();
   </script>
-  <link rel="stylesheet" href="/style.css?v=20261015-gmail">
+  <link rel="stylesheet" href="/style.css?v=20261015-ai">
   <!-- Preload the module graph so it loads in one round instead of a three-level waterfall -->
-  <link rel="modulepreload" href="/main.js?v=20261015-gmail">
-  <link rel="modulepreload" href="/claims.js?v=20261015-gmail">
-  <link rel="modulepreload" href="/gmail.js?v=20261015-gmail">
-  <link rel="modulepreload" href="/invoices.js?v=20261015-gmail">
+  <link rel="modulepreload" href="/main.js?v=20261015-ai">
+  <link rel="modulepreload" href="/claims.js?v=20261015-ai">
+  <link rel="modulepreload" href="/gmail.js?v=20261015-ai">
+  <link rel="modulepreload" href="/ai.js?v=20261015-ai">
+  <link rel="modulepreload" href="/invoices.js?v=20261015-ai">
   <link rel="modulepreload" href="/lib/constants.js">
   <link rel="modulepreload" href="/lib/core.js">
   <link rel="modulepreload" href="/lib/state.js">
@@ -78,6 +79,9 @@
               <option value="ynab">YNAB</option>
             </select>
           </label>
+          <button id="aiSettingsBtn" class="btn-theme-toggle" type="button" aria-label="AI settings" title="AI settings" aria-haspopup="dialog">
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>
+          </button>
           <button
             id="themeToggle"
             class="btn-theme-toggle"
@@ -105,6 +109,7 @@
       <div class="claims-toolbar-actions">
         <button id="gmailToggleBtn" class="btn-secondary btn-compact gmail-toggle" type="button" aria-expanded="false" aria-controls="gmailSection">Gmail<span id="gmailAlert" class="gmail-alert-dot" hidden><span class="visually-hidden"> (needs attention)</span></span></button>
         <button id="findMatchesBtn" class="btn-secondary btn-compact" type="button">Find matches</button>
+        <button id="askClaudeBtn" class="btn-secondary btn-compact" type="button" hidden title="Ask Claude to pair claims with receipts the exact-match rules miss">Ask Claude</button>
         <button id="refreshBtn" class="btn-refresh" type="button">Refresh</button>
       </div>
     </div>
@@ -283,6 +288,32 @@
     </div>
   </div>
 
-  <script type="module" src="/main.js?v=20261015-gmail"></script>
+  <dialog id="aiDialog" class="ai-dialog" aria-labelledby="aiDialogHeading">
+    <div class="ai-dialog-inner">
+      <div class="ai-dialog-header">
+        <h2 id="aiDialogHeading">AI settings</h2>
+        <button id="aiDialogClose" class="btn-secondary btn-compact" type="button">Done</button>
+      </div>
+      <p class="ai-dialog-intro">
+        Keys are stored on the server and are never shown again once saved. A key saved here is used instead of the matching Worker secret.
+      </p>
+      <ul id="aiProviderList" class="ai-provider-list"><li class="ai-provider-empty">Loading…</li></ul>
+      <div class="ai-choices">
+        <label class="gmail-field">
+          Read receipts with
+          <select id="aiVisionProvider"></select>
+          <span class="ai-choice-hint">Tried first for amounts, dates and GST. Other providers with keys are the backup.</span>
+        </label>
+        <label class="gmail-field">
+          Claude model
+          <select id="aiClaudeModel"></select>
+          <span class="ai-choice-hint">Used for reading receipts with Claude and for Ask Claude.</span>
+        </label>
+      </div>
+      <p id="aiDialogMessage" class="ai-dialog-message" role="status" aria-live="polite"></p>
+    </div>
+  </dialog>
+
+  <script type="module" src="/main.js?v=20261015-ai"></script>
 </body>
 </html>

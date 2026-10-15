@@ -8,7 +8,9 @@
     "pages:dev": "wrangler pages dev src --compatibility-date=2024-01-01",
     "smoke:frontend": "node test/frontend-smoke.cjs",
     "smoke:worker-claims": "node test/worker-claims.cjs",
-    "test:gmail": "node test/gmail-scan.cjs"
+    "test:gmail": "node test/gmail-scan.cjs",
+    "test:ai": "node test/ai-settings.cjs",
+    "smoke:ai-frontend": "node test/ai-frontend.cjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260911.1",
@@ -18,6 +20,7 @@
     "wrangler": "^4.131.0"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.134.0",
     "@cloudflare/kv-asset-handler": "^0.4.1",
     "pdf-lib": "^1.17.1"
   }

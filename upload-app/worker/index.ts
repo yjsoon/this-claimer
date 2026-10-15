@@ -3,6 +3,7 @@ import { getAssetFromKV } from '@cloudflare/kv-asset-handler';
 import manifestJSON from '__STATIC_CONTENT_MANIFEST';
 import * as xero from './xero';
 import * as gmail from './gmail';
+import * as ai from './ai';
 import { PDFDocument } from 'pdf-lib';
 
 const assetManifest = JSON.parse(manifestJSON);
@@ -94,12 +95,16 @@ interface Env {
   HOWMUCH_API_URL?: string;
   GEMINI_API_KEY?: string;
   GEMINI_MODEL?: string;
-  // Receipt vision tagging (amount extraction + GST detection): MiniMax
-  // coding-plan VLM is the primary provider for image receipts (covered by the
-  // coding-plan subscription); Gemini is the backup and handles PDFs/HEIC.
-  // Override with VISION_PROVIDER = 'gemini' | 'minimax'.
+  // Receipt vision tagging (amount extraction + GST detection) and smart
+  // matching (see worker/ai.ts). VISION_PROVIDER picks the first provider to
+  // try ('minimax' | 'anthropic' | 'gemini'); the others with keys are the
+  // fallbacks. Keys and choices saved in the app's AI settings (APP_SETTINGS
+  // KV) win over these secrets/vars.
   MINIMAX_API_KEY?: string;
+  ANTHROPIC_API_KEY?: string;
+  CLAUDE_MODEL?: string;
   VISION_PROVIDER?: string;
+  APP_SETTINGS?: KVNamespace;
   CORS_ORIGIN?: string; // Optional: lock CORS to specific origin
   // Xero integration (see worker/xero.ts). Client id/secret are secrets;
   // XERO_TOKENS stores the rotating refresh token.
@@ -183,7 +188,7 @@ interface GstDetectionResult {
   gstShown: boolean;
   gstAmount: number | null;
   confidence: number;
-  source: 'minimax' | 'gemini';
+  source: ai.AiProvider;
 }
 
 interface GstTagResult {
@@ -972,17 +977,28 @@ async function extractAmountWithMiniMax(env: Env, fileBuffer: ArrayBuffer, mimeT
   };
 }
 
-// Provider-aware amount extraction: MiniMax for image receipts, Gemini as
-// backup and for PDFs/HEIC.
-async function extractReceiptAmount(env: Env, fileBuffer: ArrayBuffer, mimeType: string): Promise<GeminiAmountResult> {
-  if (useMiniMaxFor(env, mimeType)) {
-    try {
-      return await extractAmountWithMiniMax(env, fileBuffer, mimeType);
-    } catch {
-      if (!env.GEMINI_API_KEY) throw new Error('MiniMax amount extraction failed and GEMINI_API_KEY is not configured');
-    }
+async function extractAmountWithClaude(env: Env, fileBuffer: ArrayBuffer, mimeType: string): Promise<GeminiAmountResult> {
+  const { text, model } = await ai.callClaudeWithFile(env, AMOUNT_PROMPT, ai.AMOUNT_SCHEMA, fileBuffer, mimeType, toBase64);
+
+  const parsed = parseGeminiJson(text);
+  if (!parsed) {
+    throw new Error('Claude amount response was not valid JSON');
   }
-  return extractAmountWithGemini(env, fileBuffer, mimeType);
+
+  return {
+    ...parsed,
+    model,
+  };
+}
+
+// Provider-aware amount extraction: the preferred provider first, then any
+// other provider with a key that can read this file type.
+async function extractReceiptAmount(env: Env, fileBuffer: ArrayBuffer, mimeType: string): Promise<GeminiAmountResult> {
+  return runVisionChain(env, mimeType, 'Amount extraction', {
+    minimax: () => extractAmountWithMiniMax(env, fileBuffer, mimeType),
+    anthropic: () => extractAmountWithClaude(env, fileBuffer, mimeType),
+    gemini: () => extractAmountWithGemini(env, fileBuffer, mimeType),
+  });
 }
 
 const GST_PROMPT = [
@@ -1085,28 +1101,71 @@ async function detectGstWithGemini(env: Env, fileBuffer: ArrayBuffer, mimeType: 
   return { ...parsed, source: 'gemini' };
 }
 
-function visionProvider(env: Env): 'minimax' | 'gemini' {
-  const configured = (env.VISION_PROVIDER || '').toLowerCase();
-  if (configured === 'gemini') return 'gemini';
-  if (configured === 'minimax') return 'minimax';
-  return env.MINIMAX_API_KEY ? 'minimax' : 'gemini';
+async function detectGstWithClaude(env: Env, fileBuffer: ArrayBuffer, mimeType: string): Promise<GstDetectionResult> {
+  const { text } = await ai.callClaudeWithFile(env, GST_PROMPT, ai.GST_SCHEMA, fileBuffer, mimeType, toBase64);
+
+  const parsed = parseGstJson(text);
+  if (!parsed) {
+    throw new Error('Claude GST response was not valid JSON');
+  }
+
+  return { ...parsed, source: 'anthropic' };
 }
 
-function useMiniMaxFor(env: Env, mimeType: string): boolean {
-  return visionProvider(env) === 'minimax' && !!env.MINIMAX_API_KEY && MINIMAX_IMAGE_MIMES.includes(mimeType);
+// Fallback order after the preferred provider. MiniMax is covered by the
+// coding-plan subscription, so it goes first when it can read the file.
+const VISION_FALLBACK_ORDER: ai.AiProvider[] = ['minimax', 'anthropic', 'gemini'];
+
+function visionKey(env: Env, provider: ai.AiProvider): string | undefined {
+  if (provider === 'minimax') return env.MINIMAX_API_KEY;
+  if (provider === 'anthropic') return env.ANTHROPIC_API_KEY;
+  return env.GEMINI_API_KEY;
 }
 
-// MiniMax (coding-plan VLM) is the primary GST detector for image receipts;
-// Gemini is the backup and the only option for PDFs/HEIC.
-async function detectReceiptGst(env: Env, fileBuffer: ArrayBuffer, mimeType: string): Promise<GstDetectionResult> {
-  if (useMiniMaxFor(env, mimeType)) {
+function visionSupports(provider: ai.AiProvider, mimeType: string): boolean {
+  if (provider === 'minimax') return MINIMAX_IMAGE_MIMES.includes(mimeType);
+  if (provider === 'anthropic') return ai.claudeSupports(mimeType);
+  return true; // Gemini reads images, PDFs and HEIC
+}
+
+function hasVisionKey(env: Env): boolean {
+  return VISION_FALLBACK_ORDER.some((provider) => Boolean(visionKey(env, provider)));
+}
+
+function visionProviders(env: Env, mimeType: string): ai.AiProvider[] {
+  const preferred = ai.preferredVisionProvider(env);
+  return [preferred, ...VISION_FALLBACK_ORDER.filter((p) => p !== preferred)].filter(
+    (provider) => Boolean(visionKey(env, provider)) && visionSupports(provider, mimeType)
+  );
+}
+
+async function runVisionChain<T>(
+  env: Env,
+  mimeType: string,
+  task: string,
+  run: Record<ai.AiProvider, () => Promise<T>>
+): Promise<T> {
+  const providers = visionProviders(env, mimeType);
+  if (providers.length === 0) {
+    throw new Error(`No AI provider with a key can read ${mimeType || 'this file type'}`);
+  }
+  const errors: string[] = [];
+  for (const provider of providers) {
     try {
-      return await detectGstWithMiniMax(env, fileBuffer, mimeType);
-    } catch {
-      if (!env.GEMINI_API_KEY) throw new Error('MiniMax GST detection failed and GEMINI_API_KEY is not configured');
+      return await run[provider]();
+    } catch (error) {
+      errors.push(`${provider}: ${cleanError(error).slice(0, 80)}`);
     }
   }
-  return detectGstWithGemini(env, fileBuffer, mimeType);
+  throw new Error(`${task} failed. ${errors.join('; ')}`);
+}
+
+async function detectReceiptGst(env: Env, fileBuffer: ArrayBuffer, mimeType: string): Promise<GstDetectionResult> {
+  return runVisionChain(env, mimeType, 'GST detection', {
+    minimax: () => detectGstWithMiniMax(env, fileBuffer, mimeType),
+    anthropic: () => detectGstWithClaude(env, fileBuffer, mimeType),
+    gemini: () => detectGstWithGemini(env, fileBuffer, mimeType),
+  });
 }
 
 function buildGstMetadataPatch(gst: GstDetectionResult): Record<string, string | undefined> {
@@ -1121,6 +1180,7 @@ function buildGstMetadataPatch(gst: GstDetectionResult): Record<string, string |
 }
 
 async function tagReceiptGst(env: Env, key: string, options: { force?: boolean } = {}): Promise<GstTagResult> {
+  env = await ai.withAiSettings(env);
   const object = await env.RECEIPTS.get(key);
   if (!object) {
     return { key, status: 'failed', reason: 'receipt_not_found' };
@@ -1158,6 +1218,7 @@ async function tagPendingGst(env: Env, limit: number): Promise<{
   remaining: number;
   results: GstTagResult[];
 }> {
+  env = await ai.withAiSettings(env);
   const listed = await env.RECEIPTS.list({ limit: 1000 });
   const candidateKeys: string[] = [];
   let remaining = 0;
@@ -1190,7 +1251,8 @@ async function tagPendingGst(env: Env, limit: number): Promise<{
 }
 
 async function tagReceiptAmount(env: Env, key: string, options: { force?: boolean } = {}): Promise<AmountTagResult> {
-  if (!env.GEMINI_API_KEY && !env.MINIMAX_API_KEY) {
+  env = await ai.withAiSettings(env);
+  if (!hasVisionKey(env)) {
     return { key, status: 'skipped', reason: 'missing_vision_api_key' };
   }
 
@@ -1321,6 +1383,7 @@ async function tagPendingReceipts(env: Env, limit: number): Promise<{
   failed: number;
   results: AmountTagResult[];
 }> {
+  env = await ai.withAiSettings(env);
   const scanLimit = Math.min(Math.max(limit * 4, limit), 200);
   const listed = await env.RECEIPTS.list({ limit: scanLimit });
   const candidateKeys: string[] = [];
@@ -1903,6 +1966,55 @@ function gmailImporter(env: Env, ctx: ExecutionContext): gmail.ImportFile {
   };
 }
 
+function optionalText(value: unknown, max = 120): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : undefined;
+}
+
+function optionalIsoDate(value: unknown): string | undefined {
+  return (typeof value === 'string' && extractIsoDate(value)) || undefined;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number.parseFloat(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseMatchClaims(value: unknown): ai.MatchClaim[] {
+  if (!Array.isArray(value)) return [];
+  const claims: ai.MatchClaim[] = [];
+  for (const item of value.slice(0, ai.MAX_MATCH_CLAIMS)) {
+    const raw = (item || {}) as Record<string, unknown>;
+    const id = optionalText(raw.id, 200);
+    const date = optionalIsoDate(raw.date);
+    const amount = optionalNumber(raw.amount);
+    if (!id || !date || amount === undefined) continue;
+    claims.push({ id, date, amount, payee: optionalText(raw.payee), description: optionalText(raw.description) });
+  }
+  return claims;
+}
+
+function parseMatchReceipts(value: unknown): ai.MatchReceipt[] {
+  if (!Array.isArray(value)) return [];
+  const receipts: ai.MatchReceipt[] = [];
+  for (const item of value.slice(0, ai.MAX_MATCH_RECEIPTS)) {
+    const raw = (item || {}) as Record<string, unknown>;
+    const key = optionalText(raw.key, 500);
+    if (!key) continue;
+    receipts.push({
+      key,
+      filename: optionalText(raw.filename),
+      uploaded: optionalIsoDate(raw.uploaded),
+      receiptDate: optionalIsoDate(raw.receiptDate),
+      amount: optionalNumber(raw.amount),
+      currency: optionalText(raw.currency, 12),
+      amountSgdApprox: optionalNumber(raw.amountSgdApprox),
+      vendor: optionalText(raw.vendor),
+      purpose: optionalText(raw.purpose),
+    });
+  }
+  return receipts;
+}
+
 function jsonResponse(body: unknown, corsHeaders: Record<string, string>, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -2056,8 +2168,8 @@ export default {
 
       // POST /amount-tags/pending - Tag a batch of untagged, unlinked pending receipts
       if (path === '/amount-tags/pending' && request.method === 'POST') {
-        if (!env.GEMINI_API_KEY && !env.MINIMAX_API_KEY) {
-          return new Response(JSON.stringify({ error: 'Neither MINIMAX_API_KEY nor GEMINI_API_KEY is configured' }), {
+        if (!hasVisionKey(await ai.withAiSettings(env))) {
+          return new Response(JSON.stringify({ error: 'No AI key is set. Add one in AI settings.' }), {
             status: 400,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
@@ -2079,8 +2191,8 @@ export default {
       // no GST verdict yet (includes linked/ready-to-claim receipts; skips
       // anything already pushed to Xero). Used to backfill existing receipts.
       if (path === '/gst-tags/pending' && request.method === 'POST') {
-        if (!env.MINIMAX_API_KEY && !env.GEMINI_API_KEY) {
-          return new Response(JSON.stringify({ error: 'Neither MINIMAX_API_KEY nor GEMINI_API_KEY is configured' }), {
+        if (!hasVisionKey(await ai.withAiSettings(env))) {
+          return new Response(JSON.stringify({ error: 'No AI key is set. Add one in AI settings.' }), {
             status: 400,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
@@ -2525,6 +2637,50 @@ export default {
       if (path === '/gmail/client' && request.method === 'DELETE') {
         await gmail.clearClient(env);
         return jsonResponse({ success: true }, corsHeaders);
+      }
+
+      // GET /ai/settings - which AI keys are set (never the keys themselves),
+      // the receipt-reading provider and the Claude model.
+      if (path === '/ai/settings' && request.method === 'GET') {
+        return jsonResponse(await ai.getSettingsStatus(env), corsHeaders);
+      }
+
+      // PUT /ai/settings { keys?: { anthropic?: string|null, ... },
+      // visionProvider?, claudeModel? } - null removes an app-saved key.
+      if (path === '/ai/settings' && request.method === 'PUT') {
+        const body = (await request.json().catch(() => ({}))) as ai.AiSettingsUpdate;
+        const keys = body.keys && typeof body.keys === 'object' ? body.keys : undefined;
+        try {
+          await ai.saveSettings(env, { keys, visionProvider: body.visionProvider, claudeModel: body.claudeModel });
+        } catch (err) {
+          if (err instanceof ai.AiSettingsInputError) {
+            return jsonResponse({ error: err.message }, corsHeaders, 400);
+          }
+          throw err;
+        }
+        return jsonResponse(await ai.getSettingsStatus(env), corsHeaders);
+      }
+
+      // POST /ai/match { claims: [...], receipts: [...] } - ask Claude to pair
+      // outstanding claims with unlinked receipts. Suggestions only; nothing
+      // is linked until the user accepts one.
+      if (path === '/ai/match' && request.method === 'POST') {
+        const aiEnv = await ai.withAiSettings(env);
+        if (!aiEnv.ANTHROPIC_API_KEY) {
+          return jsonResponse({ error: 'Add a Claude API key in AI settings first.' }, corsHeaders, 400);
+        }
+        const body = (await request.json().catch(() => ({}))) as { claims?: unknown; receipts?: unknown };
+        const claims = parseMatchClaims(body.claims);
+        const receipts = parseMatchReceipts(body.receipts);
+        if (claims.length === 0 || receipts.length === 0) {
+          return jsonResponse({ matches: [], model: null }, corsHeaders);
+        }
+        try {
+          return jsonResponse(await ai.suggestMatches(aiEnv, claims, receipts), corsHeaders);
+        } catch (err) {
+          console.log(`ai match failed: ${cleanError(err)}`);
+          return jsonResponse({ error: `Claude couldn't suggest matches: ${cleanError(err)}` }, corsHeaders, 502);
+        }
       }
 
       // POST /gmail/disconnect { email } - unlink one account

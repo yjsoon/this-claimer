@@ -28,6 +28,12 @@ id = "2435b070b98e4ac89312e6d784d66af0"
 binding = "GMAIL_STATE"
 id = "2435b070b98e4ac89312e6d784d66af0"
 
+# AI keys and choices saved from the app's AI settings panel (see
+# worker/ai.ts). Same namespace again; the key is ai_settings.
+[[kv_namespaces]]
+binding = "APP_SETTINGS"
+id = "2435b070b98e4ac89312e6d784d66af0"
+
 # Scan linked Gmail accounts for new receipts every four hours. Does nothing
 # until GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET are set and an account is linked.
 [triggers]
@@ -38,9 +44,12 @@ crons = ["17 */4 * * *"]
 [vars]
 XERO_SCOPES = "openid profile email accounting.transactions accounting.contacts accounting.attachments accounting.settings.read offline_access"
 XERO_INPUT_TAXTYPE = "INPUTY24"
-# Receipt vision provider for amount extraction + GST detection: "minimax"
-# (coding-plan VLM, image receipts; needs the MINIMAX_API_KEY secret) or
-# "gemini". Gemini remains the backup either way and always handles PDFs/HEIC.
+# Receipt vision provider tried first for amount extraction + GST detection:
+# "minimax" (coding-plan VLM, image receipts), "anthropic" (Claude, images and
+# PDFs) or "gemini" (everything, including HEIC). Other providers with keys are
+# the fallbacks. The AI settings panel in the app overrides this, and keys
+# pasted there override the MINIMAX_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY
+# secrets.
 VISION_PROVIDER = "minimax"
 # Gmail receipt import. GMAIL_RECEIPT_QUERY overrides the default Gmail search
 # for attachment receipts (see DEFAULT_RECEIPT_QUERY in worker/gmail.ts).
