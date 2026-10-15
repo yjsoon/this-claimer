@@ -16,7 +16,7 @@ import {
   getComparableReceiptAmounts,
 } from './lib/match.js';
 import { openPreview } from './lib/preview.js?v=20260914-preview-review';
-import { clearSelection, getClaimsBackend, loadReceipts, loadYnabTodos } from './claims.js?v=20261014-gmail-setup';
+import { clearSelection, getClaimsBackend, loadReceipts, loadYnabTodos } from './claims.js?v=20261015-gmail';
 
 const claimsView = document.getElementById('claimsView');
 const navClaims = document.getElementById('navClaims');
@@ -2131,7 +2131,7 @@ async function loadXeroStatus() {
     const data = await res.json();
     xeroConnected = Boolean(data.connected);
     if (xeroConnected) {
-      xeroStatusEl.innerHTML = `Connected to <strong>${escapeHtml(data.tenantName || 'Xero')}</strong> · <button type="button" id="xeroDisconnectBtn" class="link-button">disconnect</button>`;
+      xeroStatusEl.innerHTML = `Connected to <strong>${escapeHtml(data.tenantName || 'Xero')}</strong><button type="button" id="xeroDisconnectBtn" class="link-button">disconnect</button>`;
       const dc = document.getElementById('xeroDisconnectBtn');
       if (dc) dc.addEventListener('click', disconnectXero);
       loadXeroMeta();
