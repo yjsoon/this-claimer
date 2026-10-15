@@ -1,6 +1,6 @@
 # Worker API
 
-All endpoints require the `X-Auth-Token` header.
+All endpoints require the `X-Auth-Token` header, except the OAuth redirect targets `GET /xero/callback` and `GET /gmail/callback`, which are verified with a one-time state value instead.
 
 - `POST /upload` - Upload receipt file
 - `GET /list` - List pending receipts (includes link metadata)

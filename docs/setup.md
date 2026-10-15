@@ -63,7 +63,7 @@ npm run deploy
 
 ## 4. Custom Domain (Optional)
 
-To use a custom domain, add to `wrangler.toml`:
+To use a custom domain, replace the existing `routes` entry in `wrangler.toml`:
 
 ```toml
 routes = [
