@@ -2204,7 +2204,7 @@ function updateModeNav(activeInvoices) {
 }
 
 function updateAppTitle(invoices) {
-  document.title = invoices ? 'Invoices · Claimer' : 'Claims · Claimer';
+  document.title = invoices ? 'Invoices · This Claimer' : 'Claims · This Claimer';
 }
 
 export function navigateToMode(invoices, { replace = false, refresh = true } = {}) {
