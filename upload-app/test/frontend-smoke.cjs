@@ -463,7 +463,13 @@ async function main() {
   if (receiptDeletes.length) {
     throw new Error(`must never DELETE receipt files, got ${receiptDeletes.join(', ')}`);
   }
-  if (await page.locator('.invoice-section[data-bucket="nongst"] .invoice-clear-stamps-btn').count()) {
+  // The success status is shown before the view refreshes, so wait for the re-render.
+  const stampsCleared = await page.waitForFunction(
+    () => !document.querySelector('.invoice-section[data-bucket="nongst"] .invoice-clear-stamps-btn'),
+    null,
+    { timeout: 5000 },
+  ).then(() => true, () => false);
+  if (!stampsCleared) {
     throw new Error('clear-stamps control should hide after leftover metadata is gone');
   }
   const invoiceReceipt = receiptsPageOne.find((item) => item.key === 'receipt-2.pdf');
