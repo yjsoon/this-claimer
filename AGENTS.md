@@ -34,7 +34,7 @@ Local config lives in `.env` (gitignored); `.env.example` is the committed templ
 - `YNAB_BUDGET_ID` — from the YNAB URL when viewing the budget
 - `GEMINI_API_KEY` — for receipt amount tagging
 - `GEMINI_MODEL` — optional override (worker default: `gemini-3-flash-preview`)
-- `ANTHROPIC_API_KEY` — optional, for Claude receipt reading and Claude-assisted matching (can be set in the app's AI settings instead)
+- `ANTHROPIC_API_KEY` — optional, for Claude receipt reading and Claude-assisted matching (can be set under Settings > AI in the app instead)
 - `R2_WORKER_URL` — deployed receipt-upload worker URL
 - `R2_PASSWORD` — receipt worker auth token (must match the worker's `AUTH_PASSWORD` secret)
 - `VOLOPAY_URL` — your company's Volopay subdomain
@@ -140,13 +140,13 @@ type is a fallback, in the order MiniMax, Claude, Gemini.
 
 ### AI settings (keys in the app)
 
-The sparkle button in the header opens **AI settings** (`src/ai.js`,
-`worker/ai.ts`). Keys pasted there are checked against the provider (Anthropic
+The **AI** section of the Settings dialog (gear in the header; `src/ai.js`,
+`worker/ai.ts`) holds the provider keys. Keys pasted there are checked against the provider (Anthropic
 and Gemini), stored in KV (`APP_SETTINGS` binding, key `ai_settings`, same
 namespace as Xero/Gmail) and never returned to the browser; the UI only sees
 whether a key is set and its last four characters. A key saved in the app wins
 over the matching Worker secret, and removing it falls back to the secret. The
-dialog also sets the first receipt-reading provider and the Claude model, which
+section also sets the first receipt-reading provider and the Claude model, which
 override `VISION_PROVIDER` / `CLAUDE_MODEL`. Routes: `GET|PUT /ai/settings`.
 
 With a Claude key set, **Find matches** runs the exact rules and then sends the
@@ -173,7 +173,11 @@ the checkbox remains the manual override):
 
 The worker can link one or more Gmail accounts (read-only) and import receipts
 into R2 on its own: a cron (`[triggers]` in `wrangler.toml`, every four hours)
-plus a **Scan now** button in the Gmail panel on the Claims page.
+plus a **Scan now** button in the Gmail import section of the Settings dialog
+(gear icon in the header, `upload-app/src/settings.js`). Setup, linked accounts
+and reconnects live there too; the Claims page only shows a quiet "Gmail ·
+checked" line on the receipts column and a dismissible notice when an account
+needs reconnecting. The gear shows a dot whenever an account needs attention.
 
 - PDF/image attachments on emails matching `DEFAULT_RECEIPT_QUERY` in
   `worker/gmail.ts` (override with the `GMAIL_RECEIPT_QUERY` var). Inline

@@ -1,6 +1,6 @@
 // AI provider keys and settings, plus the Claude (Anthropic API) calls.
 //
-// Keys can be pasted into the app's AI settings panel (stored in KV, never
+// Keys can be pasted into the app's Settings > AI section (stored in KV, never
 // returned to the browser) or set as Worker secrets. A key saved in the app
 // wins over the secret, so keys can be rotated without a redeploy; removing it
 // falls back to the secret again.

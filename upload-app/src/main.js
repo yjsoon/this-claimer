@@ -8,11 +8,13 @@ import {
   setOnClaimsLoadError,
 } from './claims.js?v=20261015-ai';
 import { initGmail, loadGmailStatus, setOnGmailImported } from './gmail.js?v=20261015-ai';
-import { initAiSettings, loadAiSettings } from './ai.js?v=20261015-ai';
+import { initSettings } from './settings.js?v=20261015-ai';
+import { initAiSettings, loadAiSettings, refreshAiSettings } from './ai.js?v=20261015-ai';
 import {
   initInvoices,
   showInvoicesView,
   isInvoicesPath,
+  loadXeroStatus,
   navigateToMode,
   renderInvoiceClaimLoadError,
   renderInvoicesFromLoadedData,
@@ -23,6 +25,14 @@ initPreview();
 initAuthUi();
 initClaims();
 initInvoices();
+// Settings must exist before Gmail, which opens it after the OAuth callback.
+initSettings({
+  onOpen: () => {
+    void loadGmailStatus();
+    void loadXeroStatus();
+    void refreshAiSettings();
+  },
+});
 initGmail();
 initAiSettings();
 setOnGmailImported(() => loadReceipts());

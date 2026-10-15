@@ -98,7 +98,7 @@ interface Env {
   // Receipt vision tagging (amount extraction + GST detection) and smart
   // matching (see worker/ai.ts). VISION_PROVIDER picks the first provider to
   // try ('minimax' | 'anthropic' | 'gemini'); the others with keys are the
-  // fallbacks. Keys and choices saved in the app's AI settings (APP_SETTINGS
+  // fallbacks. Keys and choices saved in the app's Settings > AI (APP_SETTINGS
   // KV) win over these secrets/vars.
   MINIMAX_API_KEY?: string;
   ANTHROPIC_API_KEY?: string;
@@ -2169,7 +2169,7 @@ export default {
       // POST /amount-tags/pending - Tag a batch of untagged, unlinked pending receipts
       if (path === '/amount-tags/pending' && request.method === 'POST') {
         if (!hasVisionKey(await ai.withAiSettings(env))) {
-          return new Response(JSON.stringify({ error: 'No AI key is set. Add one in AI settings.' }), {
+          return new Response(JSON.stringify({ error: 'No AI key is set. Add one under Settings > AI.' }), {
             status: 400,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
@@ -2192,7 +2192,7 @@ export default {
       // anything already pushed to Xero). Used to backfill existing receipts.
       if (path === '/gst-tags/pending' && request.method === 'POST') {
         if (!hasVisionKey(await ai.withAiSettings(env))) {
-          return new Response(JSON.stringify({ error: 'No AI key is set. Add one in AI settings.' }), {
+          return new Response(JSON.stringify({ error: 'No AI key is set. Add one under Settings > AI.' }), {
             status: 400,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
@@ -2667,7 +2667,7 @@ export default {
       if (path === '/ai/match' && request.method === 'POST') {
         const aiEnv = await ai.withAiSettings(env);
         if (!aiEnv.ANTHROPIC_API_KEY) {
-          return jsonResponse({ error: 'Add a Claude API key in AI settings first.' }, corsHeaders, 400);
+          return jsonResponse({ error: 'Add a Claude API key under Settings > AI first.' }, corsHeaders, 400);
         }
         const body = (await request.json().catch(() => ({}))) as { claims?: unknown; receipts?: unknown };
         const claims = parseMatchClaims(body.claims);

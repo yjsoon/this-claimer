@@ -29,8 +29,8 @@ AUTH_PASSWORD = "your-web-app-password"
 # MINIMAX_API_KEY = "..."
 
 # Optional: Anthropic API key (sk-ant-...) for reading receipts with Claude and
-# the Ask Claude button. Any of these AI keys can instead be pasted into the AI
-# settings dialog in the app, which wins over the secret. CLAUDE_MODEL is
+# Claude's help in Find matches. Any of these AI keys can instead be pasted
+# under Settings > AI in the app, which wins over the secret. CLAUDE_MODEL is
 # optional (default claude-opus-5-5).
 # ANTHROPIC_API_KEY = "..."
 # CLAUDE_MODEL = "claude-opus-5-5"

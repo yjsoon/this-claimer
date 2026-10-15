@@ -22,7 +22,7 @@ const claimsView = document.getElementById('claimsView');
 const navClaims = document.getElementById('navClaims');
 const navInvoices = document.getElementById('navInvoices');
 const invoicesView = document.getElementById('invoicesView');
-const xeroStatusEl = document.getElementById('xeroStatus');
+const xeroStatusEls = document.querySelectorAll('[data-xero-status]');
 const invoicesRefreshBtn = document.getElementById('invoicesRefreshBtn');
 const detectGstBtn = document.getElementById('detectGstBtn');
 const invoicesSectionsEl = document.getElementById('invoicesSections');
@@ -2125,23 +2125,31 @@ async function pushInvoice(bucket, btn) {
   }
 }
 
-async function loadXeroStatus() {
+// Renders into every [data-xero-status] element: the Invoices bar and the
+// Xero section of the Settings dialog share the same status and controls.
+function renderXeroStatus(html) {
+  xeroStatusEls.forEach((el) => {
+    el.innerHTML = html;
+    el.querySelector('.xero-disconnect-btn')?.addEventListener('click', disconnectXero);
+    el.querySelector('.xero-connect-btn')?.addEventListener('click', connectXero);
+  });
+}
+
+export async function loadXeroStatus() {
   try {
     const res = await fetch(`${API_BASE}/xero/status`, { headers: authHeaders() });
     const data = await res.json();
     xeroConnected = Boolean(data.connected);
     if (xeroConnected) {
-      xeroStatusEl.innerHTML = `Connected to <strong>${escapeHtml(data.tenantName || 'Xero')}</strong><button type="button" id="xeroDisconnectBtn" class="link-button">disconnect</button>`;
-      const dc = document.getElementById('xeroDisconnectBtn');
-      if (dc) dc.addEventListener('click', disconnectXero);
+      renderXeroStatus(`Connected to <strong>${escapeHtml(data.tenantName || 'Xero')}</strong><button type="button" class="link-button xero-disconnect-btn">disconnect</button>`);
       loadXeroMeta();
     } else {
-      xeroStatusEl.innerHTML = `Not connected to Xero. <button type="button" id="xeroConnectBtn" class="btn-primary btn-connect">Connect Xero</button>`;
-      const cb = document.getElementById('xeroConnectBtn');
-      if (cb) cb.addEventListener('click', connectXero);
+      renderXeroStatus('Not connected to Xero. <button type="button" class="btn-primary btn-connect xero-connect-btn">Connect Xero</button>');
     }
   } catch (err) {
-    xeroStatusEl.textContent = 'Could not check Xero status.';
+    xeroStatusEls.forEach((el) => {
+      el.textContent = 'Could not check Xero status.';
+    });
   }
 }
 

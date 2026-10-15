@@ -1,17 +1,15 @@
-// AI settings dialog: paste or remove provider keys (Claude, MiniMax,
-// Gemini), pick which one reads receipts first, and pick the Claude model.
+// AI section of the Settings dialog: paste or remove provider keys (Claude,
+// MiniMax, Gemini), pick which one reads receipts first, and pick the Claude
+// model.
 // Keys go to the worker (see worker/ai.ts) and are never sent back; the
-// dialog only ever sees whether a key is set and its last four characters.
+// browser only ever sees whether a key is set and its last four characters.
 import { API_BASE } from './lib/constants.js';
 import { authHeaders, escapeHtml } from './lib/core.js';
 
-const openBtn = document.getElementById('aiSettingsBtn');
-const dialog = document.getElementById('aiDialog');
-const closeBtn = document.getElementById('aiDialogClose');
 const providerList = document.getElementById('aiProviderList');
 const visionSelect = document.getElementById('aiVisionProvider');
 const modelSelect = document.getElementById('aiClaudeModel');
-const messageEl = document.getElementById('aiDialogMessage');
+const messageEl = document.getElementById('aiSettingsMessage');
 
 const KEY_PLACEHOLDERS = {
   anthropic: 'sk-ant-…',
@@ -49,7 +47,7 @@ function setStatus(next) {
 
 function setMessage(type, text) {
   messageEl.textContent = text || '';
-  messageEl.className = `ai-dialog-message${type ? ` is-${type}` : ''}`;
+  messageEl.className = `ai-settings-message${type ? ` is-${type}` : ''}`;
 }
 
 function sourceText(p) {
@@ -75,7 +73,7 @@ function renderProvider(p) {
     ? `<form class="ai-key-form">
         <input class="gmail-input ai-key-input" type="password" autocomplete="off" spellcheck="false"
           aria-label="${label} API key" placeholder="${escapeHtml(KEY_PLACEHOLDERS[p.id] || '')}" required>
-        <button type="submit" class="btn-primary btn-compact">Save</button>
+        <button type="submit" class="btn-primary btn-compact" aria-label="Save ${label} key">Save</button>
         <button type="button" class="btn-secondary btn-compact ai-cancel-btn">Cancel</button>
       </form>`
     : '';
@@ -107,7 +105,7 @@ function renderSelects() {
 function render() {
   if (!providerList) return;
   if (!status) {
-    providerList.innerHTML = '<li class="ai-provider-empty">Couldn\'t load AI settings. Close and try again.</li>';
+    providerList.innerHTML = '<li class="ai-provider-empty">Couldn\'t load AI settings. Close Settings and open it again.</li>';
     renderSelects();
     return;
   }
@@ -219,20 +217,16 @@ export async function loadAiSettings() {
   }
 }
 
+// Called when Settings opens: start from a clean section, then refresh.
+export function refreshAiSettings() {
+  editing = null;
+  setMessage('', '');
+  render();
+  return loadAiSettings();
+}
+
 export function initAiSettings() {
-  if (!openBtn || !dialog) return;
-  openBtn.addEventListener('click', () => {
-    editing = null;
-    setMessage('', '');
-    render();
-    dialog.showModal();
-    void loadAiSettings();
-  });
-  closeBtn.addEventListener('click', () => dialog.close());
-  // Click on the backdrop closes, like Escape does.
-  dialog.addEventListener('click', (event) => {
-    if (event.target === dialog) dialog.close();
-  });
+  if (!providerList) return;
   visionSelect.addEventListener('change', () => {
     const label = labelFor(visionSelect.value);
     saveChoice({ visionProvider: visionSelect.value }, `Receipts will be read with ${label} first.`);

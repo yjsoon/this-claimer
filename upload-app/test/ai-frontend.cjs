@@ -1,4 +1,4 @@
-// Browser test for the AI settings dialog and Claude-assisted Find matches, against a
+// Browser test for the AI section of the Settings dialog and Claude-assisted Find matches, against a
 // mocked API. Set SCREENSHOT_DIR to also save screenshots.
 const http = require('http');
 const fs = require('fs');
@@ -75,6 +75,7 @@ async function run(browser, { viewport, colorScheme, name, full }) {
     const url = new URL(request.url());
     if (url.pathname === '/list') return route.fulfill({ json: { receipts: receiptData, hasMore: false } });
     if (url.pathname === '/ynab/todos') return route.fulfill({ json: { todos, backend: 'ynab' } });
+    if (url.pathname === '/xero/status') return route.fulfill({ json: { connected: true, tenantName: 'Test Xero' } });
     if (url.pathname === '/gmail/status') return route.fulfill({ json: { configured: false, accounts: [] } });
     if (url.pathname === '/ai/settings' && request.method() === 'GET') return route.fulfill({ json: settingsStatus(state) });
     if (url.pathname === '/ai/settings' && request.method() === 'PUT') {
@@ -120,10 +121,11 @@ async function run(browser, { viewport, colorScheme, name, full }) {
   assert.equal(matchRequests.length, 0, 'Find matches must not call Claude without a Claude key');
 
   // Settings dialog: add a Claude key (a rejected one first).
-  await page.getByRole('button', { name: 'AI settings' }).click();
-  const dialog = page.getByRole('dialog', { name: 'AI settings' });
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Settings' });
   await dialog.waitFor();
   await dialog.getByText('Worker secret · …0000').waitFor();
+  await dialog.locator('#aiSettingsSection').scrollIntoViewIfNeeded();
   if (shots) await page.screenshot({ path: path.join(shots, `${name}-settings.png`) });
   await dialog.getByRole('button', { name: 'Add Claude (Anthropic) key' }).click();
   const keyInput = dialog.getByLabel('Claude (Anthropic) API key');
@@ -132,7 +134,7 @@ async function run(browser, { viewport, colorScheme, name, full }) {
   await dialog.getByText('Anthropic rejected that key').waitFor();
   assert.equal(await dialog.isVisible(), true, 'Enter in the key field must not close the dialog');
   await keyInput.fill('sk-ant-api03-test-key-abcd');
-  await dialog.getByRole('button', { name: 'Save' }).click();
+  await dialog.getByRole('button', { name: 'Save Claude (Anthropic) key' }).click();
   await dialog.getByText('Saved here · …abcd').waitFor();
   if (shots) await page.screenshot({ path: path.join(shots, `${name}-settings-saved.png`) });
   await dialog.getByLabel('Read receipts with').selectOption('anthropic');
@@ -147,10 +149,10 @@ async function run(browser, { viewport, colorScheme, name, full }) {
     await dialog.getByText('Removed the Claude (Anthropic) key.').waitFor();
     await dialog.getByRole('button', { name: 'Add Claude (Anthropic) key' }).click();
     await dialog.getByLabel('Claude (Anthropic) API key').fill('sk-ant-api03-test-key-abcd');
-    await dialog.getByRole('button', { name: 'Save' }).click();
+    await dialog.getByRole('button', { name: 'Save Claude (Anthropic) key' }).click();
     await dialog.getByText('Saved here · …abcd').waitFor();
   }
-  await dialog.getByRole('button', { name: 'Done' }).click();
+  await dialog.getByRole('button', { name: 'Close settings' }).click();
   assert.equal(await dialog.isVisible(), false);
 
   // With a Claude key, Find matches also asks Claude, sending only the claims
