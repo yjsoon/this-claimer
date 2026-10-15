@@ -106,7 +106,13 @@ export async function checkAuth() {
     const response = await fetch(`${API_BASE}/list?limit=1`, {
       headers: authHeaders(),
     });
-    if (response.status === 401 || response.status === 429) {
+    if (response.status === 429) {
+      // Locked out for a few minutes: keep the saved password, it may be right.
+      showPasswordPrompt();
+      showStatus('error', 'Too many attempts. Try again in a few minutes.');
+      return false;
+    }
+    if (response.status === 401) {
       clearAuthToken();
       showPasswordPrompt();
       return false;
