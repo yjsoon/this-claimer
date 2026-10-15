@@ -73,6 +73,52 @@ routes = [
 
 Then add a DNS record in Cloudflare: `AAAA` record, name: `receipts`, content: `100::`, proxied.
 
+## Cloudflare Access
+
+Recommended once the app is live. Cloudflare Access puts a sign-in page in front of
+the whole hostname, so nothing (pages, API, receipts) loads until you sign in. The
+app password still applies after that. The free Zero Trust plan covers this.
+
+1. In the Cloudflare dashboard, open **Zero Trust**. The first time, pick a team
+   name (this gives you `<team>.cloudflareaccess.com`) and the Free plan.
+2. **Settings → Authentication → Login methods**: One-time PIN (an emailed code)
+   is there by default. Add **Google** if you'd rather sign in with your Google
+   account.
+3. **Access → Service auth → Service tokens → Create service token**, named e.g.
+   `claimer-clients`, duration "Non-expiring" or a year. Copy the Client ID and
+   Client Secret now; the secret is shown only once. The `scripts/` CLIs and the
+   iOS Shortcut use it.
+4. **Access → Applications → Add an application → Self-hosted**:
+   - Name: This Claimer. Domain: `receipts.yourdomain.com`, no path, so every
+     route is covered (including `/xero/callback` and `/gmail/callback`, which
+     arrive from your signed-in browser).
+   - Session duration: whatever you're comfortable with, e.g. 1 month.
+   - Policy 1, action **Allow**: Include → Emails → your email address.
+   - Policy 2, action **Service Auth**: Include → Service Token → `claimer-clients`.
+   - Save. From this point the hostname asks you to sign in.
+5. Open the application again and copy its **Application Audience (AUD) Tag**.
+   Put it and your team domain in `upload-app/wrangler.toml`, then deploy:
+   ```toml
+   ACCESS_TEAM_DOMAIN = "<team>.cloudflareaccess.com"
+   ACCESS_AUD = "<aud tag>"
+   ```
+   With both set, the Worker itself rejects any request that didn't come through
+   Access (`worker/access.ts`), so a route Access doesn't cover can't be used to
+   skip the sign-in. `workers_dev = false` in `wrangler.toml` keeps the
+   `*.workers.dev` address off for the same reason.
+6. Add the service token to the repo-root `.env` as `CF_ACCESS_CLIENT_ID` and
+   `CF_ACCESS_CLIENT_SECRET`, and to the iOS Shortcut (below). For ad hoc curl
+   calls add `-H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" -H
+   "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET"`.
+
+The scheduled Gmail scan runs inside the Worker and isn't affected. Wrong
+passwords are limited to 10 a minute per IP, after which that IP is locked out
+for five minutes even with the right password (`[[ratelimits]]` in `wrangler.toml`)
+whether or not Access is on.
+
+To undo: clear `ACCESS_TEAM_DOMAIN` / `ACCESS_AUD`, deploy, then delete the Access
+application.
+
 ## Xero invoices (optional)
 
 To enable the Invoices tab (Xero draft bills), do this once:
@@ -111,6 +157,9 @@ Create an Apple Shortcut to upload receipts directly from the Share Sheet:
    - Headers → Add new field:
       - Key: `X-Auth-Token`
       - Value: your password (same as AUTH_PASSWORD secret)
+   - If the app is behind [Cloudflare Access](#cloudflare-access), add two more headers:
+      - `CF-Access-Client-Id`: the service token's Client ID
+      - `CF-Access-Client-Secret`: the service token's Client Secret
    - Request Body: **Form**
    - Add new field → choose **File** type:
       - Key: `file`

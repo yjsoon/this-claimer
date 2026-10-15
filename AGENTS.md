@@ -23,6 +23,7 @@ The `.env` file contains secrets. When writing documentation or examples, always
 - `.agents/skills/claim-invoices/SKILL.md` - Agent mirror of the claim-invoices skill
 - `upload-app/worker/xero.ts` - Xero OAuth + bill creation/attachment for the Invoices tab
 - `upload-app/worker/gmail.ts` - Gmail OAuth (multiple accounts) + scheduled receipt import
+- `upload-app/worker/access.ts` - Cloudflare Access JWT verification and constant-time password check
 - `upload-app/worker/ai.ts` - AI keys/settings stored from the app, Claude receipt reading and Claude-assisted matching
 - `.env` - Local config (gitignored)
 - `.env.example` - Template with placeholders (safe to commit)
@@ -38,6 +39,7 @@ Local config lives in `.env` (gitignored); `.env.example` is the committed templ
 - `ANTHROPIC_API_KEY` — optional, for Claude receipt reading and Claude-assisted matching (can be set under Settings > AI in the app instead)
 - `R2_WORKER_URL` — deployed receipt-upload worker URL
 - `R2_PASSWORD` — receipt worker auth token (must match the worker's `AUTH_PASSWORD` secret)
+- `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` — Cloudflare Access service token, once the worker is behind Access
 - `VOLOPAY_URL` — your company's Volopay subdomain
 
 ## Claims Processing
@@ -222,6 +224,13 @@ curl -H "X-Auth-Token: $R2_PASSWORD" "https://receipts.yourdomain.com/list"
 
 The password is stored in `.env` as `R2_PASSWORD` and must match the worker's `AUTH_PASSWORD` secret.
 
+When the worker sits behind Cloudflare Access (`ACCESS_TEAM_DOMAIN` + `ACCESS_AUD`
+in `wrangler.toml`, verified in `worker/access.ts`), non-browser calls also need the
+service token headers from `.env`:
+`-H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET"`.
+Wrong passwords are rate-limited (10 a minute per IP, then a five-minute 429 lockout for that IP). Setup steps:
+`docs/setup.md#cloudflare-access`.
+
 ### Gemini Amount Tagging
 
 Receipt amount tagging uses MiniMax coding-plan VLM for image receipts when
@@ -260,5 +269,5 @@ Two npm packages, no root `package.json`: `upload-app/` (Cloudflare Worker + sta
 - **Run the app**: `cd upload-app && npm run dev` starts `wrangler dev` on http://localhost:8787. Miniflare emulates R2 (`RECEIPTS`) and KV (`XERO_TOKENS`, `GMAIL_STATE`, `APP_SETTINGS`), so local dev does not need a Cloudflare login. Custom-domain `routes` in `wrangler.toml` are ignored locally; the server binds to localhost. Run the dev server in tmux. Leave `npm run deploy` and `wrangler deploy` for an explicit user request.
 - **Local auth**: `wrangler dev` reads gitignored `upload-app/.dev.vars`. Copy `upload-app/.dev.vars.example` and set `AUTH_PASSWORD` to a throwaway value. Send that value as `X-Auth-Token`, or through the web password gate. Keep `.dev.vars` and the repo-root `.env` uncommitted. In docs and examples use placeholders (`https://receipts.yourdomain.com`); do not commit API keys, budget or plan IDs, or a real worker URL.
 - **Claims backend**: HowMuch is the default in the web app and on `GET /ynab/todos` when `backend` is omitted. It needs `HOWMUCH_PAT` and a plan id (`HOWMUCH_PLAN_ID`, or `YNAB_BUDGET_ID` when that value is the plan id). Without that config, Outstanding Claims shows `Error: HowMuch backend is not configured (HOWMUCH_PAT and a plan ID are required).` and Ready to Claim shows `Claims unavailable`. Choosing YNAB in the Backend selector without `YNAB_API_KEY` and `YNAB_BUDGET_ID` shows `Error: YNAB backend is not configured.` A failed upstream call shows `Error: HowMuch API error` or `Error: YNAB API error`. Receipt upload, list, and link work with only `AUTH_PASSWORD`. Xero, Gmail import, and vision tagging need their own secrets in `.dev.vars`, or AI keys saved under Settings > AI.
-- **Checks** (from `upload-app/`; the same commands `.github/workflows/deploy.yml` runs before a deploy): `npx tsc --noEmit`, `npm run smoke:frontend`, `npm run smoke:worker-claims`, `npm run test:ai`, and `npm run smoke:ai-frontend`. `smoke:frontend` and `smoke:ai-frontend` are Playwright tests against a mocked API. `smoke:worker-claims` starts a local wrangler against a fake HowMuch and passes its own test vars. `test:ai` bundles `worker/ai.ts` with esbuild against an in-memory KV and a fake Anthropic API. There is no ESLint, Biome, or Prettier config; these checks are plain Node scripts. `npm run test:gmail` is a Gmail contract test in the same style and is not part of that workflow.
+- **Checks** (from `upload-app/`; the same commands `.github/workflows/deploy.yml` runs before a deploy): `npx tsc --noEmit`, `npm run smoke:frontend`, `npm run smoke:worker-claims`, `npm run test:access`, `npm run test:ai`, and `npm run smoke:ai-frontend`. `smoke:frontend` and `smoke:ai-frontend` are Playwright tests against a mocked API. `smoke:worker-claims` starts a local wrangler against a fake HowMuch and passes its own test vars. `test:ai` bundles `worker/ai.ts` with esbuild against an in-memory KV and a fake Anthropic API. There is no ESLint, Biome, or Prettier config; these checks are plain Node scripts. `npm run test:gmail` is a Gmail contract test in the same style and is not part of that workflow.
 - **`scripts/` CLIs** (`npm run link:matches`, `submit`, `export:grab`, `export:gojek`) read the gitignored repo-root `.env` and call a reachable worker plus external services, so local `wrangler dev` is not enough to run them end to end. `link:matches` defaults to the YNAB backend; pass `--backend howmuch` to match the web app. That CLI default is separate from the web app's HowMuch default.

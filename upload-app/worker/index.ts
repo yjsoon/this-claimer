@@ -4,6 +4,7 @@ import manifestJSON from '__STATIC_CONTENT_MANIFEST';
 import * as xero from './xero';
 import * as gmail from './gmail';
 import * as ai from './ai';
+import { verifyAccess, safeEqual } from './access';
 import { PDFDocument } from 'pdf-lib';
 
 const assetManifest = JSON.parse(manifestJSON);
@@ -106,6 +107,12 @@ interface Env {
   VISION_PROVIDER?: string;
   APP_SETTINGS?: KVNamespace;
   CORS_ORIGIN?: string; // Optional: lock CORS to specific origin
+  // Cloudflare Access (see worker/access.ts). When both are set, every request
+  // must carry a valid Access JWT for this application.
+  ACCESS_TEAM_DOMAIN?: string;
+  ACCESS_AUD?: string;
+  // Limits wrong-password attempts per client IP (wrangler.toml [[ratelimits]]).
+  AUTH_RATE_LIMITER?: RateLimit;
   // Xero integration (see worker/xero.ts). Client id/secret are secrets;
   // XERO_TOKENS stores the rotating refresh token.
   XERO_TOKENS: KVNamespace;
@@ -1445,7 +1452,44 @@ function getCorsHeaders(request: Request, env: Env): Record<string, string> {
 // Validate auth token
 function validateAuth(request: Request, env: Env): boolean {
   const token = request.headers.get('X-Auth-Token');
-  return token === env.AUTH_PASSWORD;
+  if (!token || !env.AUTH_PASSWORD) return false;
+  return safeEqual(token, env.AUTH_PASSWORD);
+}
+
+// Wrong-password limiting. Failed attempts go through the rate limiter
+// binding; once an IP trips it, a short lockout in KV makes even the right
+// password fail for that IP, so a guesser can't spot a hit by its status code.
+const AUTH_LOCKOUT_SECONDS = 300;
+
+function clientIp(request: Request): string {
+  return request.headers.get('CF-Connecting-IP') || 'unknown';
+}
+
+async function authLockedOut(request: Request, env: Env): Promise<boolean> {
+  if (!env.AUTH_RATE_LIMITER || !env.APP_SETTINGS) return false;
+  try {
+    return (await env.APP_SETTINGS.get(`auth_lockout:${clientIp(request)}`)) !== null;
+  } catch {
+    return false;
+  }
+}
+
+// Records a wrong password; true when this IP is now over the limit. Requests
+// with no password at all (a page loading before sign-in) aren't guesses.
+async function recordAuthFailure(request: Request, env: Env): Promise<boolean> {
+  if (!env.AUTH_RATE_LIMITER || !request.headers.get('X-Auth-Token')) return false;
+  const ip = clientIp(request);
+  try {
+    const { success } = await env.AUTH_RATE_LIMITER.limit({ key: `auth:${ip}` });
+    if (success) return false;
+    // Write the lockout once per window, not on every further attempt.
+    if (env.APP_SETTINGS && (await env.APP_SETTINGS.get(`auth_lockout:${ip}`)) === null) {
+      await env.APP_SETTINGS.put(`auth_lockout:${ip}`, '1', { expirationTtl: AUTH_LOCKOUT_SECONDS });
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function parseCookie(header: string | null, name: string): string | null {
@@ -2039,6 +2083,18 @@ export default {
     const path = url.pathname;
     const corsHeaders = getCorsHeaders(request, env);
 
+    // Cloudflare Access gate. Covers static pages, the API and the OAuth
+    // callbacks alike: the callbacks are browser redirects, so they arrive with
+    // the Access session cookie of the signed-in browser.
+    const access = await verifyAccess(request, env);
+    if (access.enforced && !access.ok) {
+      console.warn(`access denied ${request.method} ${path}: ${access.reason}`);
+      return new Response(JSON.stringify({ error: 'Forbidden' }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
     // Block cross-origin requests from disallowed origins
     const origin = request.headers.get('Origin');
     if (origin && corsHeaders['Access-Control-Allow-Origin'] === '') {
@@ -2063,11 +2119,21 @@ export default {
       (path.startsWith('/xero/') && path !== '/xero/callback') ||
       (path.startsWith('/gmail/') && path !== '/gmail/callback');
 
-    if (isApiRoute && !validateAuth(request, env)) {
-      return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-        status: 401,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+    if (isApiRoute) {
+      const authed = validateAuth(request, env);
+      const limited = authed ? await authLockedOut(request, env) : await recordAuthFailure(request, env);
+      if (limited) {
+        return new Response(JSON.stringify({ error: 'Too many attempts. Try again in a few minutes.' }), {
+          status: 429,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Retry-After': String(AUTH_LOCKOUT_SECONDS) },
+        });
+      }
+      if (!authed) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
     }
 
     try {

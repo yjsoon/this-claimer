@@ -34,6 +34,7 @@ Use the Read tool to read `.env` in the project root. Extract these values:
 - `YNAB_BUDGET_ID` - Budget ID to query
 - `R2_WORKER_URL` - URL of the receipt upload worker
 - `R2_PASSWORD` - Password for receipt worker auth
+- `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` - Cloudflare Access service token (needed once the worker is behind Access)
 
 If `.env` is missing or incomplete, ask the user to set it up using `.env.example` as a template.
 
@@ -73,7 +74,7 @@ Parse the response to extract:
 List receipts from R2:
 
 ```bash
-curl -s -H "X-Auth-Token: <R2_PASSWORD>" "<R2_WORKER_URL>/list" | jq '.receipts'
+curl -s -H "CF-Access-Client-Id: <CF_ACCESS_CLIENT_ID>" -H "CF-Access-Client-Secret: <CF_ACCESS_CLIENT_SECRET>" -H "X-Auth-Token: <R2_PASSWORD>" "<R2_WORKER_URL>/list" | jq '.receipts'
 ```
 
 **Response includes link metadata** (if user pre-linked via web UI):
@@ -109,7 +110,7 @@ For each receipt, the agent should:
 1. Download to /tmp/claims/:
    ```bash
    mkdir -p /tmp/claims
-   curl -s -H "X-Auth-Token: <R2_PASSWORD>" "<R2_WORKER_URL>/receipt/[key]" -o /tmp/claims/[filename]
+   curl -s -H "CF-Access-Client-Id: <CF_ACCESS_CLIENT_ID>" -H "CF-Access-Client-Secret: <CF_ACCESS_CLIENT_SECRET>" -H "X-Auth-Token: <R2_PASSWORD>" "<R2_WORKER_URL>/receipt/[key]" -o /tmp/claims/[filename]
    ```
 
 2. **For HEIC/image files**: Convert if needed:
@@ -209,7 +210,7 @@ For each TODO transaction:
 3. **Download and open the receipt**:
    ```bash
    mkdir -p /tmp/claims
-   curl -s -H "X-Auth-Token: <R2_PASSWORD>" "<R2_WORKER_URL>/receipt/[key]" -o /tmp/claims/[filename]
+   curl -s -H "CF-Access-Client-Id: <CF_ACCESS_CLIENT_ID>" -H "CF-Access-Client-Secret: <CF_ACCESS_CLIENT_SECRET>" -H "X-Auth-Token: <R2_PASSWORD>" "<R2_WORKER_URL>/receipt/[key]" -o /tmp/claims/[filename]
    ```
 
    **For HEIC files**: Convert to JPEG for easier viewing, then delete the HEIC:
@@ -284,7 +285,7 @@ For each TODO transaction:
      ```
    - Delete receipt from R2:
      ```bash
-     curl -s -X DELETE -H "X-Auth-Token: <R2_PASSWORD>" "<R2_WORKER_URL>/receipt/[key]"
+     curl -s -X DELETE -H "CF-Access-Client-Id: <CF_ACCESS_CLIENT_ID>" -H "CF-Access-Client-Secret: <CF_ACCESS_CLIENT_SECRET>" -H "X-Auth-Token: <R2_PASSWORD>" "<R2_WORKER_URL>/receipt/[key]"
      ```
    - Delete local receipt file (keeps /tmp/claims clean for easier uploads):
      ```bash

@@ -6,6 +6,11 @@ main = "worker/index.ts"
 account_id = "810a0c404daff0737f4a2a97a7aab092"
 compatibility_date = "2024-01-01"
 
+# Serve only on the custom domain. The *.workers.dev and preview URLs would
+# sit outside the Cloudflare Access application that guards receipts.soon.sg.
+workers_dev = false
+preview_urls = false
+
 # Custom domain
 routes = [
   { pattern = "receipts.soon.sg/*", zone_name = "soon.sg" }
@@ -34,6 +39,13 @@ id = "2435b070b98e4ac89312e6d784d66af0"
 binding = "APP_SETTINGS"
 id = "2435b070b98e4ac89312e6d784d66af0"
 
+# Wrong-password attempts allowed per client IP per minute. Going over locks
+# that IP out for five minutes (see recordAuthFailure in worker/index.ts). namespace_id is any account-unique number.
+[[ratelimits]]
+name = "AUTH_RATE_LIMITER"
+namespace_id = "4101"
+simple = { limit = 10, period = 60 }
+
 # Scan linked Gmail accounts for new receipts every four hours. Does nothing
 # until GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET are set and an account is linked.
 [triggers]
@@ -57,6 +69,11 @@ VISION_PROVIDER = "minimax"
 # body-only ride receipts (Grab, Gojek) to PDF; without the token they are skipped.
 GMAIL_INITIAL_LOOKBACK_DAYS = "14"
 CF_ACCOUNT_ID = "810a0c404daff0737f4a2a97a7aab092"
+# Cloudflare Access. With both set, the Worker rejects any request without a
+# valid Access JWT for this application (see worker/access.ts and
+# docs/setup.md#cloudflare-access). Leave empty until the Access app exists.
+ACCESS_TEAM_DOMAIN = ""
+ACCESS_AUD = ""
 
 # Serve static files from src/
 [site]

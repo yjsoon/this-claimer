@@ -106,7 +106,7 @@ export async function checkAuth() {
     const response = await fetch(`${API_BASE}/list?limit=1`, {
       headers: authHeaders(),
     });
-    if (response.status === 401) {
+    if (response.status === 401 || response.status === 429) {
       clearAuthToken();
       showPasswordPrompt();
       return false;
@@ -127,9 +127,9 @@ export async function handlePasswordSubmit() {
     const response = await fetch(`${API_BASE}/list?limit=1`, {
       headers: authHeaders(),
     });
-    if (response.status === 401) {
+    if (response.status === 401 || response.status === 429) {
       clearAuthToken();
-      showStatus('error', 'Invalid password');
+      showStatus('error', response.status === 429 ? 'Too many attempts. Try again in a few minutes.' : 'Invalid password');
       passwordInput.value = '';
       return;
     }
