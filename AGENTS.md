@@ -14,6 +14,7 @@ The `.env` file contains secrets. When writing documentation or examples, always
 ## Project Structure
 
 - `upload-app/` - Cloudflare Worker for receipt uploads
+- `docs/` - Human docs (setup, usage, worker API, WebMCP); README.md stays short and links here
 - `scripts/` - Local automation scripts for Volopay and Gmail receipt export
 - `.claude/skills/claims/SKILL.md` - Claude Code skill for processing claims
 - `.claude/skills/ride-gmail-receipts/SKILL.md` - Skill for exporting Grab and Gojek ride receipts from Gmail using `gog`
