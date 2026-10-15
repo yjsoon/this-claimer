@@ -936,11 +936,11 @@ function mergeClaudeSuggestions(filterTerms) {
     const claim = outstanding.get(match.claimId);
     const receipt = unlinked.get(match.receiptKey);
     if (!claim || !receipt) return false;
+    const id = makeSuggestionPairId(claim.id, receipt.key);
+    if (rejectedMatchPairs.has(id)) return false;
     if (pairedClaims.has(claim.id) || pairedReceipts.has(receipt.key)) return false;
     pairedClaims.add(claim.id);
     pairedReceipts.add(receipt.key);
-    const id = makeSuggestionPairId(claim.id, receipt.key);
-    if (rejectedMatchPairs.has(id)) return false;
     if (clearClaimIds.has(claim.id) || clearReceiptKeys.has(receipt.key)) return true;
     if (claimMatchesHideFilter(claim, filterTerms)) return true;
     additions.push({
@@ -1067,7 +1067,9 @@ async function findMatches() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    const matches = Array.isArray(data.matches) ? data.matches : [];
+    // Pairs the user already dismissed are dropped before they can displace anything.
+    const matches = (Array.isArray(data.matches) ? data.matches : [])
+      .filter((m) => !rejectedMatchPairs.has(makeSuggestionPairId(m.claimId, m.receiptKey)));
     // Older picks give way to this run's on either side, so each claim and
     // each receipt still appears in at most one Claude pair.
     const freshClaims = new Set(matches.map((m) => m.claimId));

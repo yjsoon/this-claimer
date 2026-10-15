@@ -190,8 +190,17 @@ async function run(browser, { viewport, colorScheme, name, full }) {
     await findMatches.click();
     await review.getByText('Swapped pick').waitFor();
     assert.equal(await review.locator('.match-review-chip.claude').count(), 1);
+    await page.getByRole('button', { name: 'Reject match for ChatGPT' }).click();
+    await page.waitForFunction(() => document.querySelectorAll('#matchReviewList .match-review-chip.claude').length === 0);
     await findMatches.click();
     await review.getByText('USD 25 ChatGPT receipt').waitFor();
+    assert.equal(await review.locator('.match-review-chip.claude').count(), 2);
+    // A pair the user dismissed must not push out a pick for the same receipt.
+    swapNextMatch = true;
+    await findMatches.click();
+    for (let i = 0; swapNextMatch && i < 100; i += 1) await page.waitForTimeout(50);
+    assert.equal(swapNextMatch, false, 'the swapped pair was offered again');
+    await page.waitForFunction(() => document.querySelector('#findMatchesBtn')?.textContent === 'Find matches');
     assert.equal(await review.locator('.match-review-chip.claude').count(), 2);
 
     // Accept one Claude pick; dismiss the other.
