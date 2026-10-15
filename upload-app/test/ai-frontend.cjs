@@ -64,6 +64,7 @@ async function run(browser, { viewport, colorScheme, name, full }) {
   const linkRequests = [];
   let receiptData = receipts();
   let settingsGets = 0;
+  let swapNextMatch = false;
 
   const page = await browser.newPage({ viewport, colorScheme });
   await page.addInitScript(() => {
@@ -99,6 +100,12 @@ async function run(browser, { viewport, colorScheme, name, full }) {
     if (url.pathname === '/ai/match') {
       const body = JSON.parse(request.postData() || '{}');
       matchRequests.push(body);
+      if (swapNextMatch) {
+        swapNextMatch = false;
+        return route.fulfill({
+          json: { model: 'claude-opus-5-5', matches: [{ claimId: 'c-openai', receiptKey: 'r-grab.pdf', confidence: 0.6, reason: 'Swapped pick' }] },
+        });
+      }
       return route.fulfill({
         json: {
           model: 'claude-opus-5-5',
@@ -177,6 +184,16 @@ async function run(browser, { viewport, colorScheme, name, full }) {
   if (shots) await page.screenshot({ path: path.join(shots, `${name}-matches.png`), fullPage: true });
 
   if (full) {
+    // A later run that gives a receipt to another claim drops the older pick
+    // for that receipt, so pairs stay one-to-one; the next run restores them.
+    swapNextMatch = true;
+    await findMatches.click();
+    await review.getByText('Swapped pick').waitFor();
+    assert.equal(await review.locator('.match-review-chip.claude').count(), 1);
+    await findMatches.click();
+    await review.getByText('USD 25 ChatGPT receipt').waitFor();
+    assert.equal(await review.locator('.match-review-chip.claude').count(), 2);
+
     // Accept one Claude pick; dismiss the other.
     await page.getByRole('button', { name: 'Accept match for Ride to client' }).click();
     await page.waitForFunction(() => document.querySelectorAll('#matchReviewList .match-review-chip.claude').length === 1);
