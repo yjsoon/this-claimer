@@ -377,6 +377,19 @@ export async function loadReceipts() {
         const titleUnderName = titleLabel
           ? `<span class="receipt-title-tag">${escapeHtml(name)}</span>`
           : '';
+        // Gmail imports link back to their email; the chip sits beside the
+        // filename so these rows stay the same height as manual uploads.
+        const gmailLink = r.source === 'gmail' && r.gmailAccount && r.gmailMessageId
+          ? `https://mail.google.com/mail/?authuser=${encodeURIComponent(r.gmailAccount)}#all/${encodeURIComponent(r.gmailMessageId)}`
+          : '';
+        const gmailTag = r.source !== 'gmail'
+          ? ''
+          : gmailLink
+            ? `<a class="receipt-source-tag" target="_blank" rel="noopener" href="${gmailLink}" title="${escapeHtml(`${r.gmailAccount}${r.gmailSubject ? `: ${r.gmailSubject}` : ''}`)}" aria-label="Open the original email in Gmail (${escapeHtml(r.gmailAccount)}), opens in a new tab">Gmail<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M9 7h8v8"/></svg></a>`
+            : '<span class="receipt-source-tag">Gmail</span>';
+        const subLine = titleUnderName || gmailTag
+          ? `<span class="receipt-sub">${titleUnderName}${gmailTag}</span>`
+          : '';
         const linkBtnIcon = `<svg class="icon-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
               <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
@@ -400,7 +413,7 @@ export async function loadReceipts() {
             </span>
             <div class="receipt-info">
               <span class="receipt-name">${escapeHtml(primaryTitle)}</span>
-              ${titleUnderName}
+              ${subLine}
               ${usdUnderName}
             </div>
             <div class="receipt-actions">
@@ -426,6 +439,7 @@ export async function loadReceipts() {
       li.querySelector('.receipt-date').addEventListener('click', (e) => handleDateOverrideClick(e, li));
       li.querySelector('.link-btn').addEventListener('click', (e) => handleLinkBtnClick(e, li));
       li.querySelector('.delete-btn').addEventListener('click', (e) => handleDeleteBtnClick(e, li));
+      li.querySelector('.receipt-source-tag')?.addEventListener('click', (e) => e.stopPropagation());
     });
 
     // Which claims are outstanding depends on receipt links, so re-render that

@@ -30,11 +30,12 @@
       document.documentElement.dataset.themePreference = preference;
     })();
   </script>
-  <link rel="stylesheet" href="/style.css?v=20261014-mobile-rows">
+  <link rel="stylesheet" href="/style.css?v=20261015-gmail">
   <!-- Preload the module graph so it loads in one round instead of a three-level waterfall -->
-  <link rel="modulepreload" href="/main.js?v=20261014-mobile-rows">
-  <link rel="modulepreload" href="/claims.js?v=20260914-preview-review">
-  <link rel="modulepreload" href="/invoices.js?v=20261014-mobile-rows">
+  <link rel="modulepreload" href="/main.js?v=20261015-gmail">
+  <link rel="modulepreload" href="/claims.js?v=20261015-gmail">
+  <link rel="modulepreload" href="/gmail.js?v=20261015-gmail">
+  <link rel="modulepreload" href="/invoices.js?v=20261015-gmail">
   <link rel="modulepreload" href="/lib/constants.js">
   <link rel="modulepreload" href="/lib/core.js">
   <link rel="modulepreload" href="/lib/state.js">
@@ -102,10 +103,49 @@
         </p>
       </div>
       <div class="claims-toolbar-actions">
+        <button id="gmailToggleBtn" class="btn-secondary btn-compact gmail-toggle" type="button" aria-expanded="false" aria-controls="gmailSection">Gmail<span id="gmailAlert" class="gmail-alert-dot" hidden><span class="visually-hidden"> (needs attention)</span></span></button>
         <button id="findMatchesBtn" class="btn-secondary btn-compact" type="button">Find matches</button>
         <button id="refreshBtn" class="btn-refresh" type="button">Refresh</button>
       </div>
     </div>
+
+    <section id="gmailSection" class="gmail-section" aria-labelledby="gmailHeading" hidden>
+      <div class="gmail-header">
+        <h2 id="gmailHeading">Gmail import <span id="gmailCount"></span></h2>
+        <div class="gmail-actions">
+          <button id="gmailScanBtn" class="btn-secondary btn-compact" type="button" hidden>Scan now</button>
+          <button id="gmailConnectBtn" class="btn-primary btn-compact" type="button">Link Gmail account</button>
+        </div>
+      </div>
+      <p id="gmailIntro" class="gmail-intro" aria-live="polite">Checking Gmail…</p>
+      <form id="gmailSetup" class="gmail-setup" hidden>
+        <ol class="gmail-setup-steps">
+          <li>In Google Cloud, <a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com" target="_blank" rel="noopener">enable the Gmail API</a> for a project.</li>
+          <li>Under <a href="https://console.cloud.google.com/auth/clients" target="_blank" rel="noopener">Clients</a>, create a <strong>Web application</strong> client with this redirect URI:
+            <span class="gmail-redirect"><code id="gmailRedirectUri"></code><button id="gmailCopyRedirect" class="btn-secondary btn-compact" type="button">Copy</button></span>
+          </li>
+          <li>Under <a href="https://console.cloud.google.com/auth/audience" target="_blank" rel="noopener">Audience</a>, publish the app to production, so sign-ins don't expire after 7 days.</li>
+          <li>Paste the client ID and secret below.</li>
+        </ol>
+        <div class="gmail-setup-fields">
+          <label class="gmail-field">
+            <span>Client ID</span>
+            <input id="gmailClientId" class="gmail-input" type="text" autocomplete="off" spellcheck="false" placeholder="…apps.googleusercontent.com" required>
+          </label>
+          <label class="gmail-field">
+            <span>Client secret</span>
+            <input id="gmailClientSecret" class="gmail-input" type="password" autocomplete="off" spellcheck="false" required>
+          </label>
+        </div>
+        <p id="gmailSetupNote" class="gmail-setup-note" hidden>Accounts linked with the old client will need reconnecting.</p>
+        <div class="gmail-setup-actions">
+          <button id="gmailSetupSave" class="btn-primary btn-compact" type="submit">Save</button>
+          <button id="gmailSetupCancel" class="btn-secondary btn-compact" type="button" hidden>Cancel</button>
+        </div>
+      </form>
+      <ul id="gmailAccountList" class="gmail-account-list"></ul>
+      <p id="gmailClientInfo" class="gmail-client-info" hidden></p>
+    </section>
 
     <section id="matchReviewSection" class="match-review-section" hidden>
       <div class="match-review-header">
@@ -243,6 +283,6 @@
     </div>
   </div>
 
-  <script type="module" src="/main.js?v=20261014-mobile-rows"></script>
+  <script type="module" src="/main.js?v=20261015-gmail"></script>
 </body>
 </html>

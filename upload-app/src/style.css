@@ -399,6 +399,7 @@ h2 > span {
 .invoice-sort-select,
 .inv-edit-input,
 .inv-edit-select,
+.gmail-input,
 .auth-modal input[type="password"] {
   background-color: var(--surface);
   color: var(--text);
@@ -414,6 +415,7 @@ h2 > span {
 .invoice-sort-select:focus,
 .inv-edit-input:focus,
 .inv-edit-select:focus,
+.gmail-input:focus,
 .auth-modal input[type="password"]:focus {
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
@@ -3279,5 +3281,311 @@ body.selecting .claims-view {
   *::after {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
+  }
+}
+
+/* ---------- Gmail import ------------------------------------------------ */
+.gmail-section {
+  margin-bottom: 16px;
+  padding: 14px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.gmail-section[hidden] {
+  display: none;
+}
+
+.gmail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.gmail-header h2 {
+  margin: 0;
+}
+
+.gmail-actions,
+.gmail-account-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.gmail-actions [hidden],
+.gmail-account-actions [hidden] {
+  display: none;
+}
+
+.gmail-intro {
+  margin: 10px 0;
+  font-size: 0.82rem;
+  color: var(--text-2);
+}
+
+.gmail-account-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gmail-account {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+/* Error state: whole-border colour plus a tint, never an edge rail */
+.gmail-account.is-error {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+}
+
+.gmail-account-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 240px;
+}
+
+.gmail-account-email {
+  font-size: var(--font-size-title);
+  font-weight: 600;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.gmail-account-meta {
+  color: var(--text-2);
+  font-size: var(--font-size-meta);
+  overflow-wrap: anywhere;
+}
+
+.gmail-account.is-error .gmail-account-meta {
+  color: var(--danger);
+}
+
+.gmail-empty {
+  padding: 12px 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  color: var(--text-2);
+  font-size: var(--font-size-meta);
+  text-align: center;
+}
+
+/* Toolbar toggle: shows when the panel is open, and flags a broken account */
+.gmail-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.gmail-toggle[aria-expanded="true"] {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.gmail-alert-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.gmail-alert-dot[hidden] {
+  display: none;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Receipt row: filename and source chip share one line */
+.receipt-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.receipt-source-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: var(--font-size-chip);
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  background: var(--surface-3);
+  color: var(--text-2);
+  text-decoration: none;
+}
+
+.receipt-source-tag svg {
+  width: 10px;
+  height: 10px;
+}
+
+a.receipt-source-tag:hover {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+@media (max-width: 700px) {
+  .gmail-section {
+    margin-bottom: 12px;
+    padding: 12px 14px;
+  }
+
+  .gmail-actions .btn-compact,
+  .gmail-account-actions .btn-compact {
+    min-height: 40px;
+  }
+
+  a.receipt-source-tag {
+    padding: 4px 10px;
+  }
+}
+
+@media (max-width: 420px) {
+  .gmail-actions,
+  .gmail-account-actions {
+    flex: 1 1 100%;
+  }
+
+  .gmail-actions .btn-compact,
+  .gmail-account-actions .btn-compact {
+    flex: 1;
+  }
+}
+.receipt-sub .receipt-title-tag {
+  min-width: 0;
+}
+
+/* Gmail panel: one-time Google client setup */
+.gmail-setup {
+  margin-bottom: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.gmail-setup[hidden],
+.gmail-client-info[hidden] {
+  display: none;
+}
+
+.gmail-setup-steps {
+  margin: 0 0 12px;
+  padding-left: 20px;
+  font-size: 0.86rem;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+
+.gmail-setup-steps li + li {
+  margin-top: 4px;
+}
+
+.gmail-redirect {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.gmail-redirect code,
+.gmail-client-info code {
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--text);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.gmail-setup-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.gmail-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--font-size-meta);
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.gmail-input {
+  width: 100%;
+  font-size: 0.9rem;
+}
+
+.gmail-setup-note {
+  margin: 8px 0 0;
+  font-size: var(--font-size-meta);
+  color: var(--warn);
+}
+
+.gmail-setup-note[hidden] {
+  display: none;
+}
+
+.gmail-setup-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.gmail-setup-actions [hidden] {
+  display: none;
+}
+
+.gmail-client-info {
+  margin: 10px 0 0;
+  font-size: var(--font-size-meta);
+  color: var(--text-2);
+}
+
+@media (max-width: 700px) {
+  .gmail-setup-actions .btn-compact,
+  .gmail-redirect .btn-compact {
+    min-height: 40px;
+  }
+
+  .gmail-input {
+    font-size: 16px; /* stops iOS zooming into the field */
   }
 }

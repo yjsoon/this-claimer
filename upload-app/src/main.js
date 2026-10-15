@@ -6,7 +6,8 @@ import {
   loadReceipts,
   loadYnabTodos,
   setOnClaimsLoadError,
-} from './claims.js?v=20260914-preview-review';
+} from './claims.js?v=20261015-gmail';
+import { initGmail, loadGmailStatus, setOnGmailImported } from './gmail.js?v=20261015-gmail';
 import {
   initInvoices,
   showInvoicesView,
@@ -14,19 +15,21 @@ import {
   navigateToMode,
   renderInvoiceClaimLoadError,
   renderInvoicesFromLoadedData,
-} from './invoices.js?v=20261014-mobile-rows';
+} from './invoices.js?v=20261015-gmail';
 
 initTheme();
 initPreview();
 initAuthUi();
 initClaims();
 initInvoices();
+initGmail();
+setOnGmailImported(() => loadReceipts());
 setOnClaimsLoadError(renderInvoiceClaimLoadError);
 void initWebMcp();
 
 // Receipts and claims come from different backends, so fetch them together.
 async function loadEverything() {
-  await Promise.all([loadReceipts(), loadYnabTodos()]);
+  await Promise.all([loadReceipts(), loadYnabTodos(), loadGmailStatus()]);
 }
 
 setOnAuthSuccess(async () => {

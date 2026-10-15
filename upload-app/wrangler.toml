@@ -22,6 +22,17 @@ bucket_name = "receipts"
 binding = "XERO_TOKENS"
 id = "2435b070b98e4ac89312e6d784d66af0"
 
+# Linked Gmail accounts + scan state for the Gmail receipt import. Shares the
+# namespace above (keys are prefixed gmail_), so no extra namespace is needed.
+[[kv_namespaces]]
+binding = "GMAIL_STATE"
+id = "2435b070b98e4ac89312e6d784d66af0"
+
+# Scan linked Gmail accounts for new receipts every four hours. Does nothing
+# until GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET are set and an account is linked.
+[triggers]
+crons = ["17 */4 * * *"]
+
 # Non-secret Xero config. Secrets (XERO_CLIENT_ID, XERO_CLIENT_SECRET) are set
 # via `wrangler secret put` (prod) or .dev.vars (local) — never committed.
 [vars]
@@ -31,6 +42,12 @@ XERO_INPUT_TAXTYPE = "INPUTY24"
 # (coding-plan VLM, image receipts; needs the MINIMAX_API_KEY secret) or
 # "gemini". Gemini remains the backup either way and always handles PDFs/HEIC.
 VISION_PROVIDER = "minimax"
+# Gmail receipt import. GMAIL_RECEIPT_QUERY overrides the default Gmail search
+# for attachment receipts (see DEFAULT_RECEIPT_QUERY in worker/gmail.ts).
+# CF_ACCOUNT_ID is used with the CF_BROWSER_RENDERING_TOKEN secret to print
+# body-only ride receipts (Grab, Gojek) to PDF; without the token they are skipped.
+GMAIL_INITIAL_LOOKBACK_DAYS = "14"
+CF_ACCOUNT_ID = "810a0c404daff0737f4a2a97a7aab092"
 
 # Serve static files from src/
 [site]

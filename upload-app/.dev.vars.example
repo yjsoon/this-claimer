@@ -27,3 +27,14 @@ AUTH_PASSWORD = "your-web-app-password"
 # detection on image receipts. Falls back to Gemini when missing. See
 # VISION_PROVIDER in wrangler.toml.
 # MINIMAX_API_KEY = "..."
+
+# Optional: Gmail receipt import. The client can instead be pasted into the
+# Gmail panel in the app. Google Cloud OAuth client (Web application)
+# with the Gmail API enabled. Add BOTH redirect URIs to the client:
+#   https://receipts.soon.sg/gmail/callback   (production)
+#   http://localhost:8787/gmail/callback       (wrangler dev default port)
+# GOOGLE_CLIENT_ID = "....apps.googleusercontent.com"
+# GOOGLE_CLIENT_SECRET = "..."
+# Optional: Cloudflare API token with "Browser Rendering - Edit", used to print
+# Grab/Gojek email receipts to PDF. Without it those emails are skipped.
+# CF_BROWSER_RENDERING_TOKEN = "..."
