@@ -255,31 +255,10 @@ receipt metadata in the listing, or how many `head()` fallbacks were needed.
 
 ## Cursor Cloud specific instructions
 
-Dependencies (both npm packages plus the Playwright Chromium browser) are refreshed
-by the startup update script, so you normally don't need to reinstall. Commands below
-are for running/testing, not first-time setup.
+Two npm packages, no root `package.json`: `upload-app/` (Cloudflare Worker + static UI) and `scripts/` (tsx/Playwright CLIs). Run npm commands inside each package. The repo has no `.cursor/environment.json`. Install with `npm ci` in `upload-app/` and in `scripts/`, then `npx playwright install chromium` from `upload-app/` (the browser smokes need it; `scripts/` has its own Playwright for ride-receipt export). `.agents/setup` and `.agents/resume` are Amp orb scripts: they pin Node 20.20.2 and run those installs. Deploy CI uses Node 22 (`.github/workflows/deploy.yml`). Those Amp scripts are not a Cursor Cloud startup hook.
 
-- **Two independent npm packages, no root package.json**: `upload-app/` (Cloudflare
-  Worker + static web UI) and `scripts/` (tsx/Playwright CLIs). Run npm commands
-  inside each package.
-- **Run the app (main service)**: `cd upload-app && npm run dev` starts `wrangler dev`
-  on http://localhost:8787. It runs fully locally via Miniflare — R2 (`RECEIPTS`)
-  and KV (`XERO_TOKENS`) are emulated, so **no Cloudflare account or login is needed**
-  to develop. Start long-running dev servers in tmux.
-- **Local auth**: `wrangler dev` reads `upload-app/.dev.vars` (gitignored). It must
-  define `AUTH_PASSWORD` or the UI/API auth gate rejects everything. For local dev a
-  throwaway value (e.g. `localdev`) is fine; send it as the `X-Auth-Token` header or
-  in the web password gate. Copy from `upload-app/.dev.vars.example`.
-- **Optional integrations degrade gracefully**: without `YNAB_API_KEY`/`YNAB_BUDGET_ID`
-  the "Outstanding Claims" / "Ready to Claim" panels show `YNAB API error` — this is
-  expected. Receipt upload/list/delete and AI-free flows work without any of
-  YNAB/Gemini/MiniMax/Xero secrets. Add them to `.dev.vars` only to exercise those paths.
-- **wrangler.toml `routes` / custom domain are ignored** by local `wrangler dev`; the
-  server always binds to localhost. No need to change them for local work.
-- **Typecheck**: `cd upload-app && npx tsc --noEmit` (no dedicated lint or unit-test
-  setup exists in the repo).
-- **Only automated test**: `cd upload-app && npm run smoke:frontend` — a Playwright UI
-  smoke test with a mocked API (needs the Chromium browser the update script installs).
-- **`scripts/` CLIs need a reachable worker + real credentials** (`../.env` values like
-  `R2_WORKER_URL`, `R2_PASSWORD`, `YNAB_*`, `VOLOPAY_URL`); they are not exercised by
-  local worker dev alone.
+- **Run the app**: `cd upload-app && npm run dev` starts `wrangler dev` on http://localhost:8787. Miniflare emulates R2 (`RECEIPTS`) and KV (`XERO_TOKENS`, `GMAIL_STATE`, `APP_SETTINGS`), so local dev does not need a Cloudflare login. Custom-domain `routes` in `wrangler.toml` are ignored locally; the server binds to localhost. Run the dev server in tmux. Leave `npm run deploy` and `wrangler deploy` for an explicit user request.
+- **Local auth**: `wrangler dev` reads gitignored `upload-app/.dev.vars`. Copy `upload-app/.dev.vars.example` and set `AUTH_PASSWORD` to a throwaway value. Send that value as `X-Auth-Token`, or through the web password gate. Keep `.dev.vars` and the repo-root `.env` uncommitted. In docs and examples use placeholders (`https://receipts.yourdomain.com`); do not commit API keys, budget or plan IDs, or a real worker URL.
+- **Claims backend**: HowMuch is the default in the web app and on `GET /ynab/todos` when `backend` is omitted. It needs `HOWMUCH_PAT` and a plan id (`HOWMUCH_PLAN_ID`, or `YNAB_BUDGET_ID` when that value is the plan id). Without that config, Outstanding Claims shows `Error: HowMuch backend is not configured (HOWMUCH_PAT and a plan ID are required).` and Ready to Claim shows `Claims unavailable`. Choosing YNAB in the Backend selector without `YNAB_API_KEY` and `YNAB_BUDGET_ID` shows `Error: YNAB backend is not configured.` A failed upstream call shows `Error: HowMuch API error` or `Error: YNAB API error`. Receipt upload, list, and link work with only `AUTH_PASSWORD`. Xero, Gmail import, and vision tagging need their own secrets in `.dev.vars`, or AI keys saved under Settings > AI.
+- **Checks** (from `upload-app/`; the same commands `.github/workflows/deploy.yml` runs before a deploy): `npx tsc --noEmit`, `npm run smoke:frontend`, `npm run smoke:worker-claims`, `npm run test:ai`, and `npm run smoke:ai-frontend`. `smoke:frontend` and `smoke:ai-frontend` are Playwright tests against a mocked API. `smoke:worker-claims` starts a local wrangler against a fake HowMuch and passes its own test vars. `test:ai` bundles `worker/ai.ts` with esbuild against an in-memory KV and a fake Anthropic API. There is no ESLint, Biome, or Prettier config; these checks are plain Node scripts. `npm run test:gmail` is a Gmail contract test in the same style and is not part of that workflow.
+- **`scripts/` CLIs** (`npm run link:matches`, `submit`, `export:grab`, `export:gojek`) read the gitignored repo-root `.env` and call a reachable worker plus external services, so local `wrangler dev` is not enough to run them end to end. `link:matches` defaults to the YNAB backend; pass `--backend howmuch` to match the web app. That CLI default is separate from the web app's HowMuch default.
