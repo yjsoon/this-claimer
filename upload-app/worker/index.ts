@@ -2121,7 +2121,11 @@ export default {
 
     if (isApiRoute) {
       const authed = validateAuth(request, env);
-      const limited = authed ? await authLockedOut(request, env) : await recordAuthFailure(request, env);
+      // A locked-out IP gets 429 for every password, right or wrong, so the
+      // status code never tells a guesser which one was right.
+      const limited =
+        (request.headers.has('X-Auth-Token') && (await authLockedOut(request, env))) ||
+        (!authed && (await recordAuthFailure(request, env)));
       if (limited) {
         return new Response(JSON.stringify({ error: 'Too many attempts. Try again in a few minutes.' }), {
           status: 429,

@@ -170,6 +170,10 @@ async function main() {
     assert.ok(wrongBeforeLimit >= 7 && wrongBeforeLimit < 25, `limited after ${wrongBeforeLimit} more wrong passwords`);
     const lockedOut = await fetch(`${workerUrl}/list?limit=1`, { headers: { 'X-Auth-Token': 'test-auth' } });
     assert.equal(lockedOut.status, 429, 'the right password must not get through during a lockout');
+    // Wrong passwords stay 429 for the whole lockout, not just the limiter's
+    // window, or the right one would stand out as the only 429.
+    const lockedWrong = await fetch(`${workerUrl}/list?limit=1`, { headers: { 'X-Auth-Token': 'still-wrong' } });
+    assert.equal(lockedWrong.status, 429);
   } finally {
     if (wrangler.exitCode === null) {
       wrangler.kill('SIGTERM');
