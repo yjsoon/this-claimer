@@ -30,13 +30,14 @@
       document.documentElement.dataset.themePreference = preference;
     })();
   </script>
-  <link rel="stylesheet" href="/style.css?v=20261015-settings">
+  <link rel="stylesheet" href="/style.css?v=20261015-ai">
   <!-- Preload the module graph so it loads in one round instead of a three-level waterfall -->
-  <link rel="modulepreload" href="/main.js?v=20261015-settings">
-  <link rel="modulepreload" href="/claims.js?v=20261015-settings">
-  <link rel="modulepreload" href="/gmail.js?v=20261015-settings">
-  <link rel="modulepreload" href="/settings.js?v=20261015-settings">
-  <link rel="modulepreload" href="/invoices.js?v=20261015-settings">
+  <link rel="modulepreload" href="/main.js?v=20261015-ai">
+  <link rel="modulepreload" href="/claims.js?v=20261015-ai">
+  <link rel="modulepreload" href="/gmail.js?v=20261015-ai">
+  <link rel="modulepreload" href="/ai.js?v=20261015-ai">
+  <link rel="modulepreload" href="/settings.js?v=20261015-ai">
+  <link rel="modulepreload" href="/invoices.js?v=20261015-ai">
   <link rel="modulepreload" href="/lib/constants.js">
   <link rel="modulepreload" href="/lib/core.js">
   <link rel="modulepreload" href="/lib/state.js">
@@ -305,13 +306,30 @@
         </div>
       </section>
 
-      <!-- Mount point for AI provider keys (rendered by its own module). Fill it
-           with the same structure as the sections above:
-             .settings-section-head  >  .settings-section-titles (h3 + p.settings-section-desc)
-                                        [+ .settings-section-actions]
-             .settings-section-body  >  the form or list
-           Then remove the hidden attribute. -->
-      <section id="aiSettingsSection" class="settings-section" hidden></section>
+      <section id="aiSettingsSection" class="settings-section" aria-labelledby="aiSettingsHeading">
+        <div class="settings-section-head">
+          <div class="settings-section-titles">
+            <h3 id="aiSettingsHeading">AI</h3>
+            <p class="settings-section-desc">Keys for reading receipts and for Claude's help in Find matches. A key saved here replaces the matching Worker secret and is never shown again.</p>
+          </div>
+        </div>
+        <div class="settings-section-body">
+          <ul id="aiProviderList" class="ai-provider-list"><li class="ai-provider-empty">Loading…</li></ul>
+          <div class="ai-choices">
+            <label class="gmail-field">
+              <span>Read receipts with</span>
+              <select id="aiVisionProvider"></select>
+              <span class="ai-choice-hint">Tried first for amounts, dates and GST. Other providers with keys are the backup.</span>
+            </label>
+            <label class="gmail-field">
+              <span>Claude model</span>
+              <select id="aiClaudeModel"></select>
+              <span class="ai-choice-hint">Used when Claude reads receipts and when Find matches asks Claude.</span>
+            </label>
+          </div>
+          <p id="aiSettingsMessage" class="ai-settings-message" role="status" aria-live="polite"></p>
+        </div>
+      </section>
     </div>
   </dialog>
 
@@ -344,6 +362,6 @@
     </div>
   </div>
 
-  <script type="module" src="/main.js?v=20261015-settings"></script>
+  <script type="module" src="/main.js?v=20261015-ai"></script>
 </body>
 </html>

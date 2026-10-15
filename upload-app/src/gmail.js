@@ -4,7 +4,7 @@
 // page only shows a quiet status line and, when an account breaks, a notice.
 import { API_BASE } from './lib/constants.js';
 import { authHeaders, escapeHtml, showStatus } from './lib/core.js';
-import { openSettings, setSettingsAttention } from './settings.js?v=20261015-settings';
+import { openSettings, setSettingsAttention } from './settings.js?v=20261015-ai';
 
 const section = document.getElementById('gmailSettingsSection');
 const countEl = document.getElementById('gmailCount');

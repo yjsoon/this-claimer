@@ -45,6 +45,7 @@ import {
   makeSuggestionPairId,
 } from './lib/match.js';
 import { openPreview } from './lib/preview.js?v=20260914-preview-review';
+import { getAiStatus, isClaudeConfigured, loadAiSettings } from './ai.js?v=20261015-ai';
 
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
@@ -113,6 +114,7 @@ if (claimsBackendSelect) {
     setClaimsData([]);
     clearSelection();
     matchSuggestions = [];
+    claudeMatches = [];
     renderMatchReview();
     renderOutstandingClaims();
     renderLinkedPairs();
@@ -125,6 +127,10 @@ if (claimsBackendSelect) {
   });
 }
 let matchSuggestions = [];
+// Pairs Claude suggested ({ claimId, receiptKey, confidence, reason }); kept
+// across rebuilds until linked, dismissed, or the backend changes.
+let claudeMatches = [];
+let claudeMatchInFlight = false;
 let matchSuggestionRefreshTimer = null;
 let matchAcceptInFlight = false;
 let rejectedMatchPairs = loadRejectedMatchPairs();
@@ -891,6 +897,7 @@ function refreshMatchSuggestions({ announce = false } = {}) {
     rejectedPairs: rejectedMatchPairs,
   })
     .filter((suggestion) => !claimMatchesHideFilter(suggestion.claim, filterTerms));
+  mergeClaudeSuggestions(filterTerms);
   renderMatchReview();
 
   if (!announce) return;
@@ -908,6 +915,183 @@ function refreshMatchSuggestions({ announce = false } = {}) {
     `Found ${matchSuggestions.length} suggestion${matchSuggestions.length === 1 ? '' : 's'}` +
       ` (${clearCount} clear, ${ambiguousCount} ambiguous)`
   );
+}
+
+// Claude's picks sit after the rule-based ones. A clear rule match always
+// wins; for a claim the rules found ambiguous, Claude's pick replaces the guess.
+function mergeClaudeSuggestions(filterTerms) {
+  if (claudeMatches.length === 0) return;
+  const outstanding = new Map(getOutstandingClaims().map((claim) => [claim.id, claim]));
+  const unlinked = new Map(
+    receiptsData.filter((receipt) => getLinkedClaimIds(receipt).length === 0).map((receipt) => [receipt.key, receipt])
+  );
+  const clear = matchSuggestions.filter((item) => item.kind === 'clear');
+  const clearClaimIds = new Set(clear.map((item) => item.claim.id));
+  const clearReceiptKeys = new Set(clear.map((item) => item.receipt.key));
+
+  const additions = [];
+  const pairedClaims = new Set();
+  const pairedReceipts = new Set();
+  claudeMatches = claudeMatches.filter((match) => {
+    const claim = outstanding.get(match.claimId);
+    const receipt = unlinked.get(match.receiptKey);
+    if (!claim || !receipt) return false;
+    const id = makeSuggestionPairId(claim.id, receipt.key);
+    if (rejectedMatchPairs.has(id)) return false;
+    if (pairedClaims.has(claim.id) || pairedReceipts.has(receipt.key)) return false;
+    pairedClaims.add(claim.id);
+    pairedReceipts.add(receipt.key);
+    if (clearClaimIds.has(claim.id) || clearReceiptKeys.has(receipt.key)) return true;
+    if (claimMatchesHideFilter(claim, filterTerms)) return true;
+    additions.push({
+      id,
+      kind: 'claude',
+      claim,
+      receipt,
+      reason: match.reason,
+      confidence: match.confidence,
+      alternatives: [],
+    });
+    return true;
+  });
+  if (additions.length === 0) return;
+
+  const claudeClaimIds = new Set(additions.map((item) => item.claim.id));
+  const claudeReceiptKeys = new Set(additions.map((item) => item.receipt.key));
+  matchSuggestions = matchSuggestions
+    .filter((item) => item.kind === 'clear' || (!claudeClaimIds.has(item.claim.id) && !claudeReceiptKeys.has(item.receipt.key)))
+    .concat(additions);
+}
+
+function claudeMatchPayload() {
+  const clear = matchSuggestions.filter((item) => item.kind === 'clear');
+  const clearClaimIds = new Set(clear.map((item) => item.claim.id));
+  const clearReceiptKeys = new Set(clear.map((item) => item.receipt.key));
+  const byDateDesc = (a, b) => String(b.date || '').localeCompare(String(a.date || ''));
+
+  const claims = getOutstandingClaims()
+    .filter((claim) => !clearClaimIds.has(claim.id) && !claimMatchesHideFilter(claim, getClaimFilterTerms()))
+    .map((claim) => ({
+      id: claim.id,
+      date: claim.date,
+      amount: Number(claim.amount),
+      payee: claim.payee,
+      description: claim.description,
+    }))
+    .filter((claim) => Number.isFinite(claim.amount))
+    .sort(byDateDesc)
+    .slice(0, 150);
+
+  const receipts = receiptsData
+    .filter((receipt) => getLinkedClaimIds(receipt).length === 0 && !clearReceiptKeys.has(receipt.key))
+    .map((receipt) => {
+      const { date } = getReceiptMatchDate(receipt);
+      const amount = Number(receipt.taggedAmount);
+      const sgd = Number(receipt.taggedAmountSgdApprox);
+      return {
+        key: receipt.key,
+        filename: getReceiptDisplayName(receipt),
+        uploaded: receipt.uploaded,
+        receiptDate: receipt.receiptDate || receipt.detectedReceiptDate || undefined,
+        amount: Number.isFinite(amount) ? amount : undefined,
+        currency: receipt.taggedCurrency || undefined,
+        amountSgdApprox: Number.isFinite(sgd) ? sgd : undefined,
+        vendor: receipt.taggedVendor || undefined,
+        purpose: receipt.taggedPurpose || undefined,
+        date: date ? date.toISOString().slice(0, 10) : '',
+      };
+    })
+    .sort(byDateDesc)
+    .slice(0, 250)
+    .map(({ date, ...receipt }) => receipt);
+
+  return { claims, receipts };
+}
+
+function setFindMatchesBusy(busy, label = 'Asking Claude…') {
+  if (!findMatchesBtn) return;
+  findMatchesBtn.disabled = busy;
+  findMatchesBtn.textContent = busy ? label : 'Find matches';
+}
+
+function ruleMatchSummary() {
+  const clearCount = matchSuggestions.filter((item) => item.kind === 'clear').length;
+  const ambiguousCount = matchSuggestions.filter((item) => item.kind === 'ambiguous').length;
+  return clearCount || ambiguousCount ? `${clearCount} clear, ${ambiguousCount} ambiguous` : '';
+}
+
+// Find matches runs the exact rules; with a Claude key set it then asks
+// Claude about whatever the rules left unpaired.
+async function findMatches() {
+  if (claudeMatchInFlight) return;
+  // AI settings may still be loading (or have failed) right after sign-in;
+  // check before deciding Claude isn't set up.
+  if (!getAiStatus()) {
+    claudeMatchInFlight = true;
+    setFindMatchesBusy(true, 'Finding matches…');
+    try {
+      await loadAiSettings();
+    } finally {
+      claudeMatchInFlight = false;
+      setFindMatchesBusy(false);
+    }
+    if (!getAiStatus()) {
+      refreshMatchSuggestions({ announce: false });
+      showStatus('error', "Couldn't check the AI settings, so only exact matches are shown. Try again.");
+      return;
+    }
+  }
+  if (!isClaudeConfigured()) {
+    refreshMatchSuggestions({ announce: true });
+    return;
+  }
+  if (!receiptsLoadSucceeded || claimsLoadErrorMessage || claimsData.length === 0) {
+    refreshMatchSuggestions({ announce: true });
+    return;
+  }
+  refreshMatchSuggestions({ announce: false });
+  const payload = claudeMatchPayload();
+  if (payload.claims.length === 0 || payload.receipts.length === 0) {
+    refreshMatchSuggestions({ announce: true });
+    return;
+  }
+
+  claudeMatchInFlight = true;
+  setFindMatchesBusy(true);
+  showStatus('uploading', `Asking Claude about ${payload.claims.length} unmatched claim${payload.claims.length === 1 ? '' : 's'}…`);
+  try {
+    const res = await fetch(`${API_BASE}/ai/match`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    // Pairs the user already dismissed are dropped before they can displace anything.
+    const matches = (Array.isArray(data.matches) ? data.matches : [])
+      .filter((m) => !rejectedMatchPairs.has(makeSuggestionPairId(m.claimId, m.receiptKey)));
+    // Older picks give way to this run's on either side, so each claim and
+    // each receipt still appears in at most one Claude pair.
+    const freshClaims = new Set(matches.map((m) => m.claimId));
+    const freshReceipts = new Set(matches.map((m) => m.receiptKey));
+    claudeMatches = claudeMatches
+      .filter((m) => !freshClaims.has(m.claimId) && !freshReceipts.has(m.receiptKey))
+      .concat(matches);
+    setMatchReviewCollapsed(false);
+    refreshMatchSuggestions({ announce: false });
+    const fromClaude = matchSuggestions.filter((item) => item.kind === 'claude').length;
+    const parts = [ruleMatchSummary(), fromClaude ? `${fromClaude} from Claude` : ''].filter(Boolean);
+    showStatus('success', parts.length
+      ? `Found ${matchSuggestions.length} suggestion${matchSuggestions.length === 1 ? '' : 's'} (${parts.join(', ')})`
+      : 'No matches found');
+  } catch (err) {
+    refreshMatchSuggestions({ announce: false });
+    const reason = err instanceof Error && !/^HTTP /.test(err.message) ? err.message : "Claude couldn't be reached.";
+    showStatus('error', `${reason} Showing exact matches only.`);
+  } finally {
+    claudeMatchInFlight = false;
+    setFindMatchesBusy(false);
+  }
 }
 
 function renderMatchReview() {
@@ -938,12 +1122,15 @@ function renderMatchReview() {
     const claimDate = formatDateForLocale(parseDateOnly(suggestion.claim.date) || new Date(suggestion.claim.date));
     const claimLabel = (suggestion.claim.description || suggestion.claim.payee || 'Claim').trim();
     const receiptName = getReceiptDisplayName(suggestion.receipt);
-    const reason = describeMatchReason(suggestion);
+    const isClaude = suggestion.kind === 'claude';
+    const reason = isClaude ? suggestion.reason || 'Suggested by Claude' : describeMatchReason(suggestion);
     const altCount = suggestion.alternatives.length;
-    const chipClass = suggestion.kind === 'clear' ? 'clear' : 'ambiguous';
-    const chipLabel = suggestion.kind === 'clear'
-      ? 'Clear'
-      : (altCount > 0 ? `Best of ${altCount + 1}` : 'Ambiguous');
+    const chipClass = isClaude ? 'claude' : (suggestion.kind === 'clear' ? 'clear' : 'ambiguous');
+    const chipLabel = isClaude
+      ? 'Claude'
+      : suggestion.kind === 'clear'
+        ? 'Clear'
+        : (altCount > 0 ? `Best of ${altCount + 1}` : 'Ambiguous');
     const altNote = altCount > 0
       ? `<p class="match-review-alt">${altCount} other receipt${altCount === 1 ? ' also matches' : 's also match'} — use Change to pick</p>`
       : (suggestion.kind === 'ambiguous'
@@ -1480,7 +1667,7 @@ refreshBtn.addEventListener('click', async () => {
 
 if (findMatchesBtn) {
   findMatchesBtn.addEventListener('click', () => {
-    refreshMatchSuggestions({ announce: true });
+    findMatches();
   });
 }
 

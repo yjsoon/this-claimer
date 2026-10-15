@@ -22,6 +22,7 @@ The `.env` file contains secrets. When writing documentation or examples, always
 - `.agents/skills/claim-invoices/SKILL.md` - Agent mirror of the claim-invoices skill
 - `upload-app/worker/xero.ts` - Xero OAuth + bill creation/attachment for the Invoices tab
 - `upload-app/worker/gmail.ts` - Gmail OAuth (multiple accounts) + scheduled receipt import
+- `upload-app/worker/ai.ts` - AI keys/settings stored from the app, Claude receipt reading and Claude-assisted matching
 - `.env` - Local config (gitignored)
 - `.env.example` - Template with placeholders (safe to commit)
 
@@ -33,6 +34,7 @@ Local config lives in `.env` (gitignored); `.env.example` is the committed templ
 - `YNAB_BUDGET_ID` — from the YNAB URL when viewing the budget
 - `GEMINI_API_KEY` — for receipt amount tagging
 - `GEMINI_MODEL` — optional override (worker default: `gemini-3-flash-preview`)
+- `ANTHROPIC_API_KEY` — optional, for Claude receipt reading and Claude-assisted matching (can be set under Settings > AI in the app instead)
 - `R2_WORKER_URL` — deployed receipt-upload worker URL
 - `R2_PASSWORD` — receipt worker auth token (must match the worker's `AUTH_PASSWORD` secret)
 - `VOLOPAY_URL` — your company's Volopay subdomain
@@ -123,11 +125,37 @@ the user's go-ahead.
 ### Vision Tagging (Amounts + GST Detection)
 
 Receipt vision tagging (amount/date/vendor/purpose extraction and GST
-detection) is provider-switched: MiniMax coding-plan VLM (`MINIMAX_API_KEY`
-secret, an `sk-cp-` key; calls are covered by the coding-plan subscription) is
-the primary for image receipts; Gemini (`GEMINI_API_KEY`) is the backup and
-always handles PDF/HEIC. Toggle via the `VISION_PROVIDER` var in `wrangler.toml`
-(`minimax` | `gemini`).
+detection) is provider-switched across three providers:
+
+- MiniMax coding-plan VLM (`MINIMAX_API_KEY`, an `sk-cp-` key; covered by the
+  coding-plan subscription): image receipts only.
+- Claude via the Anthropic API (`ANTHROPIC_API_KEY`, `sk-ant-`): images and
+  PDFs, through `@anthropic-ai/sdk` with structured JSON output. Model from
+  `CLAUDE_MODEL` (default `claude-opus-5-5`).
+- Gemini (`GEMINI_API_KEY`): everything, including HEIC.
+
+`VISION_PROVIDER` in `wrangler.toml` (`minimax` | `anthropic` | `gemini`) picks
+which is tried first; every other provider with a key that can read the file
+type is a fallback, in the order MiniMax, Claude, Gemini.
+
+### AI settings (keys in the app)
+
+The **AI** section of the Settings dialog (gear in the header; `src/ai.js`,
+`worker/ai.ts`) holds the provider keys. Keys pasted there are checked against the provider (Anthropic
+and Gemini), stored in KV (`APP_SETTINGS` binding, key `ai_settings`, same
+namespace as Xero/Gmail) and never returned to the browser; the UI only sees
+whether a key is set and its last four characters. A key saved in the app wins
+over the matching Worker secret, and removing it falls back to the secret. The
+section also sets the first receipt-reading provider and the Claude model, which
+override `VISION_PROVIDER` / `CLAUDE_MODEL`. Routes: `GET|PUT /ai/settings`.
+
+With a Claude key set, **Find matches** runs the exact rules and then sends the
+outstanding claims and unlinked receipts the rules didn't clearly pair to
+Claude (`POST /ai/match`, capped at 150 claims / 250 receipts). Claude's pairs
+show in Match review with a "Claude" chip and its reason. Nothing is linked
+until the user accepts a suggestion; Claude's pick replaces an ambiguous rule
+suggestion for the same claim but never a clear one. Without a Claude key, or
+if the call fails, Find matches shows the exact matches only.
 
 The GST checkbox on each invoice line defaults from the AI verdict stored on
 the receipt (`taggedGstShown` / `taggedGstAmount` / `taggedGstSource` metadata;

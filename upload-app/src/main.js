@@ -6,9 +6,10 @@ import {
   loadReceipts,
   loadYnabTodos,
   setOnClaimsLoadError,
-} from './claims.js?v=20261015-settings';
-import { initGmail, loadGmailStatus, setOnGmailImported } from './gmail.js?v=20261015-settings';
-import { initSettings } from './settings.js?v=20261015-settings';
+} from './claims.js?v=20261015-ai';
+import { initGmail, loadGmailStatus, setOnGmailImported } from './gmail.js?v=20261015-ai';
+import { initSettings } from './settings.js?v=20261015-ai';
+import { initAiSettings, loadAiSettings, refreshAiSettings } from './ai.js?v=20261015-ai';
 import {
   initInvoices,
   showInvoicesView,
@@ -17,7 +18,7 @@ import {
   navigateToMode,
   renderInvoiceClaimLoadError,
   renderInvoicesFromLoadedData,
-} from './invoices.js?v=20261015-settings';
+} from './invoices.js?v=20261015-ai';
 
 initTheme();
 initPreview();
@@ -26,16 +27,17 @@ initClaims();
 initInvoices();
 // Settings must exist before Gmail, which opens it after the OAuth callback.
 initSettings({
-  onOpen: () => Promise.allSettled([loadGmailStatus(), loadXeroStatus()]),
+  onOpen: () => Promise.allSettled([loadGmailStatus(), loadXeroStatus(), refreshAiSettings()]),
 });
 initGmail();
+initAiSettings();
 setOnGmailImported(() => loadReceipts());
 setOnClaimsLoadError(renderInvoiceClaimLoadError);
 void initWebMcp();
 
 // Receipts and claims come from different backends, so fetch them together.
 async function loadEverything() {
-  await Promise.all([loadReceipts(), loadYnabTodos(), loadGmailStatus()]);
+  await Promise.all([loadReceipts(), loadYnabTodos(), loadGmailStatus(), loadAiSettings()]);
 }
 
 setOnAuthSuccess(async () => {

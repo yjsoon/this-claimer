@@ -400,6 +400,7 @@ h2 > span {
 .inv-edit-input,
 .inv-edit-select,
 .gmail-input,
+.ai-choices select,
 .auth-modal input[type="password"] {
   background-color: var(--surface);
   color: var(--text);
@@ -416,6 +417,7 @@ h2 > span {
 .inv-edit-input:focus,
 .inv-edit-select:focus,
 .gmail-input:focus,
+.ai-choices select:focus,
 .auth-modal input[type="password"]:focus {
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
@@ -913,6 +915,12 @@ select {
   background: var(--warn-soft);
   color: var(--warn);
   border: 1px solid var(--warn-border);
+}
+
+.match-review-chip.claude {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  border: 1px solid transparent;
 }
 
 .match-review-reason {
@@ -3815,6 +3823,130 @@ a.receipt-source-tag:hover {
 
   .gmail-notice-actions .btn-compact,
   .gmail-notice-actions .btn-refresh {
+    min-height: 40px;
+  }
+}
+
+/* Settings: AI section (provider keys + choices) */
+.ai-provider-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.ai-provider,
+.ai-provider-empty {
+  padding: 10px 12px;
+}
+
+.ai-provider-empty {
+  font-size: 0.82rem;
+  color: var(--text-3);
+}
+
+.ai-provider + .ai-provider {
+  border-top: 1px solid var(--border);
+}
+
+.ai-provider-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ai-provider-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ai-provider-name {
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.ai-provider-meta {
+  font-size: var(--font-size-meta);
+  color: var(--text-2);
+}
+
+.ai-provider-meta.is-unset {
+  color: var(--text-3);
+}
+
+.ai-provider-meta a {
+  margin-left: 4px;
+}
+
+.ai-provider-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.ai-key-form {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ai-key-form .gmail-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.ai-choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.ai-choices select {
+  width: 100%;
+  font-size: 0.86rem;
+}
+
+.ai-choice-hint {
+  font-weight: 400;
+  color: var(--text-3);
+  line-height: 1.4;
+}
+
+.ai-settings-message {
+  margin: 10px 0 0;
+  font-size: var(--font-size-meta);
+  color: var(--text-2);
+}
+
+.ai-settings-message:empty {
+  display: none;
+}
+
+.ai-settings-message.is-success {
+  color: var(--success);
+}
+
+.ai-settings-message.is-error {
+  color: var(--danger);
+}
+
+@media (max-width: 700px) {
+  .ai-key-form {
+    flex-wrap: wrap;
+  }
+
+  .ai-key-form .gmail-input {
+    flex-basis: 100%;
+    font-size: 16px; /* stops iOS zooming into the field */
+  }
+
+  .ai-provider-actions .btn-compact,
+  .ai-key-form .btn-compact {
     min-height: 40px;
   }
 }

@@ -28,6 +28,13 @@ AUTH_PASSWORD = "your-web-app-password"
 # VISION_PROVIDER in wrangler.toml.
 # MINIMAX_API_KEY = "..."
 
+# Optional: Anthropic API key (sk-ant-...) for reading receipts with Claude and
+# Claude's help in Find matches. Any of these AI keys can instead be pasted
+# under Settings > AI in the app, which wins over the secret. CLAUDE_MODEL is
+# optional (default claude-opus-5-5).
+# ANTHROPIC_API_KEY = "..."
+# CLAUDE_MODEL = "claude-opus-5-5"
+
 # Optional: Gmail receipt import. The client can instead be pasted into the
 # Gmail panel in the app. Google Cloud OAuth client (Web application)
 # with the Gmail API enabled. Add BOTH redirect URIs to the client:
