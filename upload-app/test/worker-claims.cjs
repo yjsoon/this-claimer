@@ -2,6 +2,9 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 const net = require('node:net');
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 function listen(server, port = 0) {
   return new Promise((resolve, reject) => {
@@ -90,6 +93,9 @@ async function main() {
   const workerUrl = `http://127.0.0.1:${workerPort}`;
   const wrangler = spawn(process.execPath, [
     'node_modules/wrangler/bin/wrangler.js', 'dev', '--local', '--port', String(workerPort),
+    // Fresh local state each run, so a lockout left by the password-limit
+    // check below can't leak into the next run.
+    '--persist-to', fs.mkdtempSync(path.join(os.tmpdir(), 'worker-claims-')),
     '--var', 'AUTH_PASSWORD:test-auth',
     '--var', 'HOWMUCH_PAT:test-pat',
     '--var', 'HOWMUCH_PLAN_ID:test-plan',
@@ -145,6 +151,29 @@ async function main() {
     assert.equal(missingDescription.response.status, 502);
     assert.equal(requests.length, 0, 'editable Xero descriptions must not be used as claim memos');
     assert.deepEqual(missingDescription.body.taggedReceipts, []);
+
+    // Wrong passwords: 10 a minute per IP, then that IP is locked out, even
+    // with the right password. Requests with no password don't count. Runs
+    // last because the lockout outlives the test's remaining requests.
+    for (let i = 0; i < 15; i += 1) {
+      assert.equal((await fetch(`${workerUrl}/list?limit=1`)).status, 401);
+    }
+    assert.equal((await fetch(`${workerUrl}/list?limit=1`, { headers: { 'X-Auth-Token': 'test-auth' } })).status, 200);
+    // Three wrong tokens were already spent on the AI route checks above. The
+    // limiter's window is fixed, so allow for a reset partway through.
+    let wrongBeforeLimit = 0;
+    for (; wrongBeforeLimit < 25; wrongBeforeLimit += 1) {
+      const response = await fetch(`${workerUrl}/list?limit=1`, { headers: { 'X-Auth-Token': `wrong-${wrongBeforeLimit}` } });
+      if (response.status === 429) break;
+      assert.equal(response.status, 401);
+    }
+    assert.ok(wrongBeforeLimit >= 7 && wrongBeforeLimit < 25, `limited after ${wrongBeforeLimit} more wrong passwords`);
+    const lockedOut = await fetch(`${workerUrl}/list?limit=1`, { headers: { 'X-Auth-Token': 'test-auth' } });
+    assert.equal(lockedOut.status, 429, 'the right password must not get through during a lockout');
+    // Wrong passwords stay 429 for the whole lockout, not just the limiter's
+    // window, or the right one would stand out as the only 429.
+    const lockedWrong = await fetch(`${workerUrl}/list?limit=1`, { headers: { 'X-Auth-Token': 'still-wrong' } });
+    assert.equal(lockedWrong.status, 429);
   } finally {
     if (wrangler.exitCode === null) {
       wrangler.kill('SIGTERM');
@@ -153,7 +182,7 @@ async function main() {
     await new Promise((resolve) => howMuch.close(resolve));
   }
 
-  console.log('Worker HowMuch batch claim contract passed (and AI routes require auth)');
+  console.log('Worker HowMuch batch claim contract passed (and AI routes require auth, wrong passwords are limited)');
 }
 
 main().catch((error) => {

@@ -35,6 +35,7 @@ Use the Read tool to read `.env` in the project root. Extract these values:
 - `YNAB_BUDGET_ID` - Budget ID to query
 - `R2_WORKER_URL` - URL of the receipt upload worker
 - `R2_PASSWORD` - Password for receipt worker auth
+- `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` - Cloudflare Access service token (needed once the worker is behind Access)
 - `VOLOPAY_URL` - Volopay base URL
 
 If `.env` is missing or incomplete, ask the user to set it up using `.env.example` as a template.
@@ -75,7 +76,7 @@ Parse the response to extract:
 List receipts from R2:
 
 ```bash
-curl -s -H "X-Auth-Token: <R2_PASSWORD>" "<R2_WORKER_URL>/list" | jq '.receipts'
+curl -s -H "CF-Access-Client-Id: <CF_ACCESS_CLIENT_ID>" -H "CF-Access-Client-Secret: <CF_ACCESS_CLIENT_SECRET>" -H "X-Auth-Token: <R2_PASSWORD>" "<R2_WORKER_URL>/list" | jq '.receipts'
 ```
 
 **Pre-linked receipts**: Auto-match only when `linkedClaimId` is present and `linkedClaimsBackend` is `"ynab"` or absent. Ignore HowMuch-owned links in this YNAB workflow.
@@ -90,7 +91,7 @@ For each receipt, the agent should:
 1. Download to /tmp/claims/:
    ```bash
    mkdir -p /tmp/claims
-   curl -s -H "X-Auth-Token: <R2_PASSWORD>" "<R2_WORKER_URL>/receipt/[key]" -o /tmp/claims/[filename]
+   curl -s -H "CF-Access-Client-Id: <CF_ACCESS_CLIENT_ID>" -H "CF-Access-Client-Secret: <CF_ACCESS_CLIENT_SECRET>" -H "X-Auth-Token: <R2_PASSWORD>" "<R2_WORKER_URL>/receipt/[key]" -o /tmp/claims/[filename]
    ```
 
 2. **For HEIC/image files**: Convert if needed:
@@ -196,7 +197,7 @@ Download the receipt and prepare it for dev-browser's sandboxed upload:
 ```bash
 # Download receipt
 mkdir -p /tmp/claims
-curl -s -H "X-Auth-Token: <R2_PASSWORD>" "<R2_WORKER_URL>/receipt/[key]" -o "/tmp/claims/[filename]"
+curl -s -H "CF-Access-Client-Id: <CF_ACCESS_CLIENT_ID>" -H "CF-Access-Client-Secret: <CF_ACCESS_CLIENT_SECRET>" -H "X-Auth-Token: <R2_PASSWORD>" "<R2_WORKER_URL>/receipt/[key]" -o "/tmp/claims/[filename]"
 
 # For HEIC files: convert to JPEG, then delete HEIC
 sips -Z 1500 /tmp/claims/file.heic --out /tmp/claims/file.jpg
@@ -414,7 +415,7 @@ Cleanup tasks (for reference):
   ```
 - Delete receipt from R2:
   ```bash
-  curl -s -X DELETE -H "X-Auth-Token: <R2_PASSWORD>" "<R2_WORKER_URL>/receipt/[key]"
+  curl -s -X DELETE -H "CF-Access-Client-Id: <CF_ACCESS_CLIENT_ID>" -H "CF-Access-Client-Secret: <CF_ACCESS_CLIENT_SECRET>" -H "X-Auth-Token: <R2_PASSWORD>" "<R2_WORKER_URL>/receipt/[key]"
   ```
 - Delete local receipt file:
   ```bash

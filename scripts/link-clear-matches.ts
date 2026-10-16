@@ -252,10 +252,18 @@ function describe(candidate: Candidate): string {
   ].join(' ');
 }
 
+// Cloudflare Access service token, needed once the worker sits behind Access.
+function accessHeaders(): Record<string, string> {
+  const id = process.env.CF_ACCESS_CLIENT_ID?.trim();
+  const secret = process.env.CF_ACCESS_CLIENT_SECRET?.trim();
+  return id && secret ? { 'CF-Access-Client-Id': id, 'CF-Access-Client-Secret': secret } : {};
+}
+
 async function fetchJson<T>(url: string, password: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     ...init,
     headers: {
+      ...accessHeaders(),
       'X-Auth-Token': password,
       ...(init?.headers || {}),
     },

@@ -42,6 +42,10 @@ jobs:
         working-directory: upload-app
         run: npm run smoke:worker-claims
 
+      - name: Access verification tests
+        working-directory: upload-app
+        run: npm run test:access
+
       - name: AI settings tests
         working-directory: upload-app
         run: |

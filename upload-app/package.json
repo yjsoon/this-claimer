@@ -10,6 +10,7 @@
     "smoke:worker-claims": "node test/worker-claims.cjs",
     "test:gmail": "node test/gmail-scan.cjs",
     "test:ai": "node test/ai-settings.cjs",
+    "test:access": "node test/access.cjs",
     "smoke:ai-frontend": "node test/ai-frontend.cjs"
   },
   "devDependencies": {
