@@ -60,6 +60,7 @@ async function markClaimed(workerUrl, lineItems) {
 async function main() {
   const requests = [];
   let responseMode = 'success';
+  let serverVersion = 'old';
   const claimedDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Singapore' }).format(new Date());
   const howMuch = http.createServer(async (request, response) => {
     const body = await new Promise((resolve) => {
@@ -76,10 +77,20 @@ async function main() {
       return;
     }
 
-    const transactions = body.transactions.map((transaction, index) => ({
-      ...transaction,
-      memo: responseMode === 'mismatch' && index === 1 ? 'TODO: unchanged' : transaction.memo,
-    }));
+    // Two HowMuch versions: one before the claim field, which stores the
+    // CLAIMED memo and returns no claim fields, and one with it, which moves
+    // the CLAIMED word into claim_status and claimed_on and keeps the rest of
+    // the memo.
+    const transactions = body.transactions.map((transaction, index) => {
+      const mismatch = responseMode.endsWith('mismatch') && index === 1;
+      if (serverVersion === 'old') {
+        return { id: transaction.id, memo: mismatch ? 'TODO: unchanged' : transaction.memo };
+      }
+      const claimed = /^CLAIMED - (\d{4}-\d{2}-\d{2}): (.*)$/.exec(transaction.memo);
+      return mismatch
+        ? { id: transaction.id, memo: claimed[2], claim_status: 'to_claim', claimed_on: null }
+        : { id: transaction.id, memo: claimed[2], claim_status: transaction.claim_status, claimed_on: transaction.claimed_on };
+    });
     response.writeHead(200, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify({ data: {
       transaction_ids: transactions.map((transaction) => transaction.id),
@@ -126,10 +137,12 @@ async function main() {
     assert.equal(success.response.status, 200, JSON.stringify(success.body));
     assert.equal(requests.length, 1, 'HowMuch claims should use one upstream request');
     assert.equal(requests[0].method, 'PATCH');
+    // One body serves both HowMuch versions: the CLAIMED memo for the old one,
+    // the claim fields for the new one.
     assert.deepEqual(requests[0].body, {
       transactions: [
-        { id: 'claim-1', memo: `CLAIMED - ${claimedDate}: First claim` },
-        { id: 'claim-2', memo: `CLAIMED - ${claimedDate}: Second claim` },
+        { id: 'claim-1', memo: `CLAIMED - ${claimedDate}: First claim`, claim_status: 'claimed', claimed_on: claimedDate },
+        { id: 'claim-2', memo: `CLAIMED - ${claimedDate}: Second claim`, claim_status: 'claimed', claimed_on: claimedDate },
       ],
     });
     assert.deepEqual(success.body.claimedYnab, [
@@ -143,6 +156,24 @@ async function main() {
     assert.equal(mismatch.response.status, 502);
     assert.deepEqual(mismatch.body.taggedReceipts, [], 'unverified claims must prevent receipt tagging');
     assert.equal(mismatch.body.claimedYnab[1].status, 'failed');
+
+    // HowMuch with the claim field: the stored memo no longer carries CLAIMED,
+    // so the claim is confirmed by its fields.
+    serverVersion = 'new';
+    requests.length = 0;
+    responseMode = 'success';
+    const fieldSuccess = await markClaimed(workerUrl, [lineItem('claim-4', 'Fourth claim'), lineItem('claim-5', 'Fifth claim')]);
+    assert.equal(fieldSuccess.response.status, 200, JSON.stringify(fieldSuccess.body));
+    assert.deepEqual(fieldSuccess.body.claimedYnab, [
+      { id: 'claim-4', status: 'claimed' },
+      { id: 'claim-5', status: 'claimed' },
+    ]);
+    requests.length = 0;
+    responseMode = 'field-mismatch';
+    const fieldMismatch = await markClaimed(workerUrl, [lineItem('claim-6', 'Sixth claim'), lineItem('claim-7', 'Seventh claim')]);
+    assert.equal(fieldMismatch.response.status, 502);
+    assert.equal(fieldMismatch.body.claimedYnab[1].status, 'failed', 'a row still to claim is not claimed');
+    serverVersion = 'old';
 
     requests.length = 0;
     const missingDescriptionLine = lineItem('claim-3', 'Original claim');

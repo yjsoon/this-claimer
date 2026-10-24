@@ -142,6 +142,10 @@ interface YnabTransaction {
   transfer_transaction_id: string | null;
   // HowMuch only: the amount is an estimate still to check against the statement.
   needs_confirmation?: boolean;
+  // HowMuch only: "to_claim", "claimed" (with claimed_on) or null. Absent on
+  // YNAB and on HowMuch versions before the field, which keep TODO memos.
+  claim_status?: 'to_claim' | 'claimed' | null;
+  claimed_on?: string | null;
   subtransactions?: YnabSubtransaction[];
 }
 
@@ -421,8 +425,30 @@ function parseTodoDescription(memo: string | null | undefined): string | null {
   return description || 'Claim';
 }
 
+// HowMuch's own memo-word rule (its transaction-claim.ts): a leading word
+// counts when it is in capitals or followed by a colon in any case. Used only
+// for HowMuch rows stored before the claim field, so prose such as "Todo list
+// app" is not read as a claim where HowMuch does not show one either.
+const HOWMUCH_TODO_WORD = /^\s*(TODO)(?=[:\s]|$)(:?)\s*/i;
+
+function parseHowMuchLegacyTodo(memo: string | null | undefined): string | null {
+  const match = HOWMUCH_TODO_WORD.exec(memo || '');
+  if (!match || (match[1] !== 'TODO' && match[2] !== ':')) return null;
+  return (memo || '').slice(match[0].length).trim() || 'Claim';
+}
+
+// The claim description for a transaction, or null when it is not a claim.
+// HowMuch's claim_status wins; rows without it (YNAB, older HowMuch, HowMuch
+// rows stored before the field) keep the TODO memo convention.
+function transactionClaimDescription(transaction: YnabTransaction): string | null {
+  if (transaction.claim_status === 'to_claim') return (transaction.memo || '').trim() || 'Claim';
+  if (transaction.claim_status === 'claimed') return null;
+  if (transaction.claim_status === null) return parseHowMuchLegacyTodo(transaction.memo);
+  return parseTodoDescription(transaction.memo);
+}
+
 function toYnabTodoFromTransaction(transaction: YnabTransaction): YnabTodo | null {
-  const description = parseTodoDescription(transaction.memo);
+  const description = transactionClaimDescription(transaction);
   if (!description) return null;
 
   // For transfers, only keep the outflow side to avoid duplicate TODOs.
@@ -1906,9 +1932,14 @@ async function markHowMuchClaimed(
 
   for (let offset = 0; offset < pending.length; offset += HOWMUCH_UPDATE_BATCH_SIZE) {
     const batch = pending.slice(offset, offset + HOWMUCH_UPDATE_BATCH_SIZE);
+    // HowMuch with the claim field stores claim_status and claimed_on and keeps
+    // the memo as the description; older HowMuch ignores those two fields and
+    // stores the CLAIMED memo, as before.
     const updates = batch.map((claim) => ({
       id: claim.ynabClaimId,
       memo: `CLAIMED - ${claimedDate}: ${claim.claimDescription}`,
+      claim_status: 'claimed' as const,
+      claimed_on: claimedDate,
     }));
 
     try {
@@ -1924,16 +1955,16 @@ async function markHowMuchClaimed(
       }
 
       const body = (await response.json()) as {
-        data?: { transactions?: Array<{ id?: string; memo?: string | null }> };
+        data?: { transactions?: Array<Pick<YnabTransaction, 'id' | 'memo' | 'claim_status' | 'claimed_on'>> };
       };
-      const returned = new Map((body.data?.transactions || []).map((transaction) => [transaction.id, transaction.memo]));
+      const returned = new Map((body.data?.transactions || []).map((transaction) => [transaction.id, transaction]));
       batch.forEach((claim, index) => {
         const update = updates[index];
         results.set(
           claim.ynabClaimId,
-          returned.get(claim.ynabClaimId) === update.memo
+          howMuchConfirmsClaimed(returned.get(claim.ynabClaimId), update.memo, claimedDate)
             ? { status: 'claimed' }
-            : { status: 'failed', detail: 'HowMuch did not confirm the requested memo update.' }
+            : { status: 'failed', detail: 'HowMuch did not confirm the claim.' }
         );
       });
       if (batch.some((claim) => results.get(claim.ynabClaimId)?.status === 'failed')) break;
@@ -1952,7 +1983,23 @@ async function markHowMuchClaimed(
   return claims.map((claim) => ({ id: claim.ynabClaimId, ...results.get(claim.ynabClaimId)! }));
 }
 
-// Flip a transaction memo from "TODO: ..." to "CLAIMED - YYYY-MM-DD: ...".
+// A HowMuch row came back claimed: by its claim field when the server has one,
+// otherwise by the CLAIMED memo an older server stores.
+function howMuchConfirmsClaimed(
+  transaction: Pick<YnabTransaction, 'memo' | 'claim_status' | 'claimed_on'> | undefined,
+  memo: string,
+  claimedDate: string
+): boolean {
+  if (!transaction) return false;
+  if (transaction.claim_status !== undefined) {
+    return transaction.claim_status === 'claimed' && transaction.claimed_on === claimedDate;
+  }
+  return transaction.memo === memo;
+}
+
+// Flip a transaction memo from "TODO: ..." to "CLAIMED - YYYY-MM-DD: ...". On
+// HowMuch with the claim field, also set claim_status and claimed_on (the
+// server then keeps the memo as the description).
 async function markYnabClaimed(
   env: Env,
   transactionId: string,
@@ -1969,16 +2016,22 @@ async function markYnabClaimed(
     const authHeaders = { Authorization: `Bearer ${config.token}` };
     const getRes = await fetch(base, { headers: authHeaders });
     if (!getRes.ok) return { status: 'failed', detail: await readYnabError(getRes) };
-    const getData = (await getRes.json()) as { data?: { transaction?: { memo?: string | null } } };
+    const getData = (await getRes.json()) as { data?: { transaction?: Pick<YnabTransaction, 'memo' | 'claim_status'> } };
     const memo = getData.data?.transaction?.memo || '';
-    if (/^\s*CLAIMED\b/i.test(memo)) return { status: 'claimed' }; // already done
+    const claimField = getData.data?.transaction?.claim_status;
+    if (claimField === 'claimed') return { status: 'claimed' }; // already done
+    if (claimField === undefined && /^\s*CLAIMED\b/i.test(memo)) return { status: 'claimed' };
     const newMemo = /^\s*TODO:?/i.test(memo)
       ? memo.replace(/^\s*TODO:?\s*/i, `CLAIMED - ${claimedDate}: `)
       : `CLAIMED - ${claimedDate}: ${memo}`.trim();
     const putRes = await fetch(base, {
       method: 'PUT',
       headers: { ...authHeaders, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transaction: { memo: newMemo } }),
+      body: JSON.stringify({
+        transaction: backend === 'howmuch' && claimField !== undefined
+          ? { memo: newMemo, claim_status: 'claimed', claimed_on: claimedDate }
+          : { memo: newMemo },
+      }),
     });
     return putRes.ok ? { status: 'claimed' } : { status: 'failed', detail: await readYnabError(putRes) };
   } catch (err) {

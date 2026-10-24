@@ -4,7 +4,7 @@
 
 1. **Visit the web app**: Enter your password to authenticate
 2. **Upload receipts**: Drag and drop or tap to upload
-3. **View pending claims**: HowMuch transactions with `TODO:` memos appear automatically; use the Backend selector to switch to YNAB
+3. **View pending claims**: HowMuch transactions marked **To claim** (and older ones whose memo starts with `TODO:`) appear automatically; use the Backend selector to switch to YNAB, where the `TODO:` memo is the marker
 4. **Process claims**: Run `/claims` in Claude Code to match receipts to transactions
 
 A HowMuch transaction marked **To confirm** (`needs_confirmation`) has an estimated amount, usually a foreign spend at a guessed rate. Its claim shows an amber ≈ before the amount, and pushing it to Xero asks first. Confirm the amount in HowMuch (or fix it on the invoice line) before billing.
@@ -42,9 +42,10 @@ transport (line items grouped by account, sorted by date); each line's account,
 GST flag and remark are editable. **Push to Xero (draft)** creates the bill (payee
 "Soon Yin Jie", tax-inclusive), attaches the receipts (merging into combined PDFs
 when over Xero's 3 MB / 10-attachment caps), then presents a separate **Mark
-checked as claimed** action. That action tags the receipts and flips linked
-`TODO:` memos to `CLAIMED - YYYY-MM-DD:` in their originating backend; creating the draft
-alone does not change claim memos.
+checked as claimed** action. That action tags the receipts and marks the linked
+claims claimed in their originating backend (in HowMuch, the claim field and its day;
+in YNAB, the memo becomes `CLAIMED - YYYY-MM-DD:`); creating the draft alone does not
+change claims.
 
 The worker talks to Xero over raw `fetch` (OAuth 2.0; rotating refresh token in the
 `XERO_TOKENS` KV namespace). Setup and usage: `.claude/skills/claim-invoices/SKILL.md`.
