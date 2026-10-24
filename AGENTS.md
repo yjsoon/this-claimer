@@ -67,8 +67,10 @@ The claims skill auto-invokes when the user mentions claims, expenses, reimburse
 
 ## YNAB Memo Convention
 
-- `TODO: <description>` — pending claim
-- `CLAIMED: <description>` — processed claim
+- `TODO: <description>` — pending claim (the memo must start with `TODO` and then `:` or a space; any case)
+- `CLAIMED - YYYY-MM-DD: <description>` — processed claim
+
+HowMuch shows the same convention as a "To claim" tag and writes `TODO: ` itself. HowMuch transactions can also carry `needs_confirmation: true` ("To confirm"), meaning the amount is an estimate still to be checked against the statement. Claims carry it as `needsConfirmation`; the app marks those amounts with an amber ≈ and warns before pushing them to Xero.
 
 ## Volopay Claim Submission
 

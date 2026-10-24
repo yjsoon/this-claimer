@@ -377,6 +377,7 @@ function lineSourceSnapshot(line) {
     amount: Number(line.amount || 0).toFixed(2),
     date: line.date || '',
     description: line.description || '',
+    needsConfirmation: line.needsConfirmation === true,
   };
 }
 
@@ -384,7 +385,24 @@ function sourceSnapshotsMatch(current, saved) {
   if (!saved) return false;
   return current.amount === saved.amount
     && current.date === saved.date
-    && current.description === saved.description;
+    && current.description === saved.description
+    // Older snapshots have no flag; treat that as "not an estimate".
+    && Boolean(current.needsConfirmation) === Boolean(saved.needsConfirmation);
+}
+
+// True while the line still bills HowMuch's estimated amount. Editing the
+// amount on the line replaces the estimate, so the mark goes away.
+function isLineEstimate(line) {
+  if (line?.needsConfirmation !== true || !Number.isFinite(line.claimAmount)) return false;
+  return Number(line.amount || 0).toFixed(2) === Number(line.claimAmount).toFixed(2);
+}
+
+const ESTIMATE_LINE_TITLE = 'Estimated in HowMuch. Check the statement or edit the amount before pushing.';
+
+function invoiceAmountHtml(line) {
+  const amount = `S$${Number(line.amount).toFixed(2)}`;
+  if (!isLineEstimate(line)) return `<span class="inv-cell-text">${amount}</span>`;
+  return `<span class="inv-cell-text" title="${escapeHtml(ESTIMATE_LINE_TITLE)}"><span class="estimate-mark" role="img" aria-label="Estimated amount, to confirm in HowMuch">≈</span>${amount}</span>`;
 }
 
 function snapshotsMatch(a, b) {
@@ -497,6 +515,9 @@ function buildInvoiceLines() {
         ynabClaimId: isReadyOnly ? null : claimId,
         claimSource: claim?.source || null,
         claimDescription: claim?.description || null,
+        // HowMuch "To confirm": the claim amount is still an estimate.
+        needsConfirmation: claim?.needsConfirmation === true,
+        claimAmount: claim && Number.isFinite(Number(claim.amount)) ? Number(claim.amount) : null,
         claimsBackend,
         sourceUrl: claimsBackend === 'howmuch' ? (claim?.sourceUrl || '') : '',
         xeroPendingInvoiceId: receipt.xeroPendingInvoiceId || '',
@@ -703,8 +724,9 @@ function renderInvoiceLineRow(line, accounts) {
   const section = getLineSection(line);
   const reviewed = isLineReviewed(line);
   const invalidated = line.reviewInvalidated === true;
+  const estimate = isLineEstimate(line);
   return `
-    <tr data-id="${escapeHtml(line.id)}" class="${reviewed ? 'inv-row-reviewed' : ''}${invalidated ? ' inv-row-stale' : ''}">
+    <tr data-id="${escapeHtml(line.id)}" class="${reviewed ? 'inv-row-reviewed' : ''}${invalidated ? ' inv-row-stale' : ''}${estimate ? ' inv-row-estimate' : ''}">
       <td class="col-actions" data-label="Actions">
         <div class="inv-action-stack">
           <div class="inv-row-actions">
@@ -725,7 +747,7 @@ function renderInvoiceLineRow(line, accounts) {
       <td class="inv-cell-editable inv-cell-account" data-label="Account" data-field="accountCode" data-input="select" title="Tap to edit"><span class="inv-cell-text">${escapeHtml(accountLabel(line.accountCode, accounts))}</span></td>
       <td class="inv-cell-editable inv-cell-type" data-label="Type" data-field="section" data-input="type" title="Tap to edit"><span class="inv-cell-text">${escapeHtml(BUCKET_LABEL[section])}</span></td>
       <td class="inv-cell-editable inv-cell-tax" data-label="Tax" data-field="taxType" data-input="select" title="Tap to edit">${taxTypeCellHtml(deriveTaxType(line))}</td>
-      <td class="num inv-cell-editable inv-cell-amount" data-label="Amount" data-field="amount" data-input="text" title="Tap to edit"><span class="inv-cell-text">S$${Number(line.amount).toFixed(2)}</span></td>
+      <td class="num inv-cell-editable inv-cell-amount" data-label="Amount" data-field="amount" data-input="text" title="Tap to edit">${invoiceAmountHtml(line)}</td>
     </tr>${invalidated ? renderInvoiceStaleNoteRow() : ''}`;
 }
 
@@ -1101,7 +1123,10 @@ function attachInvoiceRowEditors(tr, line, accounts) {
   attachTextEditCell(tr.querySelector('[data-field="amount"]'), line, 'amount', {
     inputType: 'number',
     inputAttrs: 'step="0.01" min="0"',
-    format: (v) => `S$${Number(v).toFixed(2)}`,
+    displayHtml: (current) => {
+      tr.classList.toggle('inv-row-estimate', isLineEstimate(current));
+      return invoiceAmountHtml(current);
+    },
     parse: (v) => {
       const n = Number(v);
       return Number.isFinite(n) ? n : 0;
@@ -2056,6 +2081,11 @@ async function pushInvoice(bucket, btn) {
   if (!xeroConnected) {
     showStatus('error', 'Connect Xero first.');
     return;
+  }
+  const estimates = lines.filter(isLineEstimate);
+  if (estimates.length > 0) {
+    const count = estimates.length === 1 ? '1 line still carries' : `${estimates.length} lines still carry`;
+    if (!window.confirm(`${count} a HowMuch estimate (≈). Push to the Xero draft anyway?`)) return;
   }
   const reference = window.prompt(
     `${invoicePushSummary(bucket, lines)}\n\nReference / note for this bill:`,

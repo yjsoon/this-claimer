@@ -7,6 +7,8 @@
 3. **View pending claims**: HowMuch transactions with `TODO:` memos appear automatically; use the Backend selector to switch to YNAB
 4. **Process claims**: Run `/claims` in Claude Code to match receipts to transactions
 
+A HowMuch transaction marked **To confirm** (`needs_confirmation`) has an estimated amount, usually a foreign spend at a guessed rate. Its claim shows an amber ≈ before the amount, and pushing it to Xero asks first. Confirm the amount in HowMuch (or fix it on the invoice line) before billing.
+
 Receipts can also be marked ready without a visible TODO claim. Click the receipt link button, then choose **Mark ready** without selecting a claim. These receipts move under **Ready to Claim** alongside ordinary linked claim-receipt pairs.
 
 The `/claims` skill lives in `.claude/skills/claims/SKILL.md`.

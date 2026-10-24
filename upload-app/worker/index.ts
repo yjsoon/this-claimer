@@ -140,6 +140,8 @@ interface YnabTransaction {
   memo: string | null;
   category_name?: string | null;
   transfer_transaction_id: string | null;
+  // HowMuch only: the amount is an estimate still to check against the statement.
+  needs_confirmation?: boolean;
   subtransactions?: YnabSubtransaction[];
 }
 
@@ -163,6 +165,8 @@ interface YnabTodo {
   source: 'transaction' | 'subtransaction';
   parentTransactionId?: string;
   sourceUrl?: string;
+  // True when HowMuch marks the amount "To confirm" (an estimate).
+  needsConfirmation?: boolean;
 }
 
 type ClaimsBackend = 'howmuch' | 'ynab';
@@ -435,6 +439,7 @@ function toYnabTodoFromTransaction(transaction: YnabTransaction): YnabTodo | nul
     accountName: transaction.account_name || 'Unknown account',
     categoryName: transaction.category_name || undefined,
     source: 'transaction',
+    ...(transaction.needs_confirmation === true ? { needsConfirmation: true } : {}),
   };
 }
 
@@ -452,6 +457,8 @@ function toYnabTodoFromSubtransaction(parent: YnabTransaction, subtransaction: Y
     categoryName: subtransaction.category_name || parent.category_name || undefined,
     source: 'subtransaction',
     parentTransactionId: parent.id,
+    // The marker lives on the parent, so every split line inherits it.
+    ...(parent.needs_confirmation === true ? { needsConfirmation: true } : {}),
   };
 }
 
@@ -2592,6 +2599,7 @@ export default {
               backend,
               summary: {
                 todoClaimCount: todos.length,
+                toConfirmClaimCount: todos.filter((todo) => todo.needsConfirmation).length,
                 missingReceiptClaimCount: missingReceiptClaims.length,
                 linkedClaimCount: linkedClaims.length,
                 unlinkedReceiptCount: unlinkedReceipts.length,

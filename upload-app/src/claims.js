@@ -714,7 +714,7 @@ function renderLinkedPairs() {
           <div class="linked-pair-side linked-pair-claim">
             <span class="linked-pair-title">${escapeHtml(claimTitle)}</span>
             <span class="linked-pair-sub">${escapeHtml(claimSub)}</span>
-            <span class="linked-pair-meta">${escapeHtml(claimDate)} · ${escapeHtml(claimAmount)}</span>
+            <span class="linked-pair-meta">${escapeHtml(claimDate)} · ${claim?.needsConfirmation ? ESTIMATE_MARK_HTML : ''}${escapeHtml(claimAmount)}</span>
           </div>
           <div class="linked-pair-connector" aria-hidden="true">${isReadyOnly ? '✓' : '↔'}</div>
           <button type="button" class="linked-pair-side linked-pair-receipt"
@@ -810,6 +810,9 @@ function getReceiptAmountLabel(receipt) {
   }
   return '';
 }
+
+// HowMuch "To confirm": the claim amount is still an estimate.
+const ESTIMATE_MARK_HTML = '<span class="estimate-mark" role="img" aria-label="Estimated amount, to confirm in HowMuch" title="Estimated amount, to confirm in HowMuch">≈</span>';
 
 function formatClaimAmount(amount) {
   return formatCurrencyAmount('SGD', Number(amount));
@@ -1628,7 +1631,7 @@ function renderOutstandingClaims() {
               <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
             </svg>`;
       return `
-        <li class="todo-item" data-claim-id="${escapeHtml(t.id)}"
+        <li class="todo-item${t.needsConfirmation ? ' todo-item-estimate' : ''}" data-claim-id="${escapeHtml(t.id)}"
             data-amount="${t.amount}" data-description="${escapeHtml(t.description)}"
             data-date="${t.date}">
           <span class="select-indicator claim-selector" aria-hidden="true">
@@ -1642,7 +1645,7 @@ function renderOutstandingClaims() {
           <div class="todo-actions">
             <div class="todo-meta">
               <span class="todo-date">${formatDateForLocale(parseDateOnly(t.date) || new Date(t.date))}</span>
-              <span class="todo-amount">${escapeHtml(formatClaimAmount(t.amount))}</span>
+              <span class="todo-amount">${t.needsConfirmation ? ESTIMATE_MARK_HTML : ''}${escapeHtml(formatClaimAmount(t.amount))}</span>
             </div>
             <button class="link-btn claim-link-btn" title="Link receipts to this claim" aria-label="Link receipts to this claim">
               ${linkBtnIcon}

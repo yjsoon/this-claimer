@@ -3950,3 +3950,29 @@ a.receipt-source-tag:hover {
     min-height: 40px;
   }
 }
+
+/* HowMuch "To confirm": the claim amount is still an estimate. */
+.estimate-mark {
+  color: var(--warn);
+  font-weight: 650;
+  margin-right: 3px;
+}
+
+.todo-item.todo-item-estimate {
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+
+.inv-row-estimate td {
+  background: var(--warn-soft);
+}
+
+@media (max-width: 700px) {
+  .invoice-doc-table tbody tr.inv-row-estimate {
+    border-color: var(--warn-border);
+    background: var(--warn-soft);
+  }
+
+  .inv-row-estimate td {
+    background: transparent;
+  }
+}
