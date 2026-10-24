@@ -1935,9 +1935,11 @@ async function markHowMuchClaimed(
     // HowMuch with the claim field stores claim_status and claimed_on and keeps
     // the memo as the description; older HowMuch ignores those two fields and
     // stores the CLAIMED memo, as before.
+    // "Claim" stands in for an empty memo; keep the memo empty rather than
+    // writing the placeholder back as its text.
     const updates = batch.map((claim) => ({
       id: claim.ynabClaimId,
-      memo: `CLAIMED - ${claimedDate}: ${claim.claimDescription}`,
+      memo: claim.claimDescription === 'Claim' ? `CLAIMED - ${claimedDate}:` : `CLAIMED - ${claimedDate}: ${claim.claimDescription}`,
       claim_status: 'claimed' as const,
       claimed_on: claimedDate,
     }));
