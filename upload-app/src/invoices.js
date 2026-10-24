@@ -426,6 +426,13 @@ function applySavedInvoiceEdits(lines) {
     const saved = store[line.id];
     const sourceSnapshot = lineSourceSnapshot(line);
     line.sourceSnapshot = sourceSnapshot;
+    // A saved amount equal to the claim's own figure is no override (older
+    // versions saved one on every click), so drop it and keep following HowMuch.
+    if (saved && 'amount' in saved && Number.isFinite(line.claimAmount)
+      && Number(saved.amount).toFixed(2) === Number(line.claimAmount).toFixed(2)) {
+      delete saved.amount;
+      delete saved.amountEdited;
+    }
     if (saved) {
       const { claimsBackend: _savedBackend, ...savedEdits } = saved;
       Object.assign(line, savedEdits);
