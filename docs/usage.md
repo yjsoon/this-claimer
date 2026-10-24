@@ -73,7 +73,7 @@ Mobile/Desktop                    YNAB
 │ Storage │     (Claude)      │   API    │
 └─────────┘                   └──────────┘
      │                              │
-     │ Delete when done             │ Update to CLAIMED:
+     │ Delete when done             │ Update to CLAIMED
      ▼                              ▼
   Cleaned up                   Marked complete
 ```

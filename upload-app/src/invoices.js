@@ -881,14 +881,22 @@ function attachTextEditCell(cell, line, field, {
 
     const commit = () => {
       const parsed = parse ? parse(input.value) : input.value;
+      const cents = (value) => Number(value).toFixed(2);
+      // The cell shows two places, so clicking through it is not an edit: keep
+      // following the live figure (a revised HowMuch estimate included).
+      if (field === 'amount' && cents(parsed) === cents(original)) {
+        line[field] = original;
+        activeInvoiceEditCell = null;
+        renderDisplay();
+        return;
+      }
       const changed = parsed !== original;
       line[field] = parsed;
-      // A typed amount replaces HowMuch's figure, including an estimate.
-      // Compare at cents: the cell shows two places, so tabbing through a
-      // three-place HowMuch figure must not count as an edit.
-      const amountChanged = field === 'amount'
-        && Number(parsed).toFixed(2) !== Number(original).toFixed(2);
-      const amountEdit = amountChanged ? { amountEdited: true } : {};
+      // A typed amount replaces HowMuch's figure, including an estimate, unless
+      // it is that same figure.
+      const amountEdit = field === 'amount'
+        ? { amountEdited: !Number.isFinite(line.claimAmount) || cents(parsed) !== cents(line.claimAmount) }
+        : {};
       Object.assign(line, amountEdit);
       saveInvoiceEdit(line.id, { [field]: parsed, ...amountEdit });
       if (changed) reaffirmLineReviewAfterEdit(line, cell);

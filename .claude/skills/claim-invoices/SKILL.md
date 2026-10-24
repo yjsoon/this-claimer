@@ -10,7 +10,7 @@ Turns the "ready to claim" items in the receipts.soon.sg upload-app into monthly
 non-GST / transport; line items are grouped by account and sorted by date; payee
 is **"Soon Yin Jie"**; receipts are attached. After a push, receipts are tagged
 `xeroInvoiceId` (so they drop off the tab) and the linked YNAB `TODO:` memos are
-flipped to `CLAIMED:`.
+flipped to `CLAIMED - YYYY-MM-DD:`.
 
 ## Where it lives
 
