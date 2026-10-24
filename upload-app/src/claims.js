@@ -1145,7 +1145,7 @@ function renderMatchReview() {
         <div class="match-review-claim">
           <span>${escapeHtml(claimLabel)}</span>
           <span>${escapeHtml(claimDate)}</span>
-          <span>${escapeHtml(formatClaimAmount(suggestion.claim.amount))}</span>
+          <span>${suggestion.claim.needsConfirmation ? ESTIMATE_MARK_HTML : ''}${escapeHtml(formatClaimAmount(suggestion.claim.amount))}</span>
         </div>
         <span class="match-review-arrow" aria-hidden="true">suggested receipt</span>
         <div class="match-review-receipt">
@@ -1321,7 +1321,8 @@ function updateLinkingContext() {
     }
     const dateStr = formatDateForLocale(parseDateOnly(claim.date) || new Date(claim.date));
     const claimLabel = (claim.description || claim.payee || 'Claim').trim();
-    linkingContextText.textContent = `Linking claim: ${[claimLabel, formatCurrencyAmount('SGD', Number(claim.amount)), dateStr].filter(Boolean).join(' · ')}`;
+    const claimAmount = `${claim.needsConfirmation ? '≈ ' : ''}${formatCurrencyAmount('SGD', Number(claim.amount))}`;
+    linkingContextText.textContent = `Linking claim: ${[claimLabel, claimAmount, dateStr].filter(Boolean).join(' · ')}`;
     if (linkingContextPreview) linkingContextPreview.hidden = true;
     linkingDock.hidden = false;
     return;

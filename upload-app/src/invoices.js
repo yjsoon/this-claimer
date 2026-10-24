@@ -386,14 +386,16 @@ function sourceSnapshotsMatch(current, saved) {
   return current.amount === saved.amount
     && current.date === saved.date
     && current.description === saved.description
-    // Older snapshots have no flag; treat that as "not an estimate".
-    && Boolean(current.needsConfirmation) === Boolean(saved.needsConfirmation);
+    // Only becoming an estimate after review matters; confirming at the same
+    // amount makes the reviewed figure authoritative. Older snapshots have no flag.
+    && !(current.needsConfirmation && !saved.needsConfirmation);
 }
 
 // True while the line still bills HowMuch's estimated amount. Editing the
 // amount on the line replaces the estimate, so the mark goes away.
 function isLineEstimate(line) {
-  if (line?.needsConfirmation !== true || !Number.isFinite(line.claimAmount)) return false;
+  if (line?.needsConfirmation !== true || line.amountEdited === true) return false;
+  if (!Number.isFinite(line.claimAmount)) return false;
   return Number(line.amount || 0).toFixed(2) === Number(line.claimAmount).toFixed(2);
 }
 
@@ -881,7 +883,14 @@ function attachTextEditCell(cell, line, field, {
       const parsed = parse ? parse(input.value) : input.value;
       const changed = parsed !== original;
       line[field] = parsed;
-      saveInvoiceEdit(line.id, { [field]: parsed });
+      // A typed amount replaces HowMuch's figure, including an estimate.
+      // Compare at cents: the cell shows two places, so tabbing through a
+      // three-place HowMuch figure must not count as an edit.
+      const amountChanged = field === 'amount'
+        && Number(parsed).toFixed(2) !== Number(original).toFixed(2);
+      const amountEdit = amountChanged ? { amountEdited: true } : {};
+      Object.assign(line, amountEdit);
+      saveInvoiceEdit(line.id, { [field]: parsed, ...amountEdit });
       if (changed) reaffirmLineReviewAfterEdit(line, cell);
       activeInvoiceEditCell = null;
       renderDisplay();
@@ -1136,7 +1145,7 @@ function attachInvoiceRowEditors(tr, line, accounts) {
     e.stopPropagation();
     commitActiveInvoiceEdit();
     openPreview(line.receiptKey, line.receiptName, {
-      amount: formatCurrencyAmount('SGD', Number(line.amount)),
+      amount: `${isLineEstimate(line) ? '≈ ' : ''}${formatCurrencyAmount('SGD', Number(line.amount))}`,
       onReview: () => setLineReviewed(line, true, reviewBtn),
     });
   });

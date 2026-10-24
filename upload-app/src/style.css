@@ -3951,7 +3951,8 @@ a.receipt-source-tag:hover {
   }
 }
 
-/* HowMuch "To confirm": the claim amount is still an estimate. */
+/* HowMuch "To confirm": the claim amount is still an estimate. A bar, not a
+   wash, so it does not read as a stale review. */
 .estimate-mark {
   color: var(--warn);
   font-weight: 650;
@@ -3962,17 +3963,16 @@ a.receipt-source-tag:hover {
   box-shadow: inset 3px 0 0 var(--warn);
 }
 
-.inv-row-estimate td {
-  background: var(--warn-soft);
+.invoice-doc-table tbody tr.inv-row-estimate td:first-child {
+  box-shadow: inset 3px 0 0 var(--warn);
 }
 
 @media (max-width: 700px) {
   .invoice-doc-table tbody tr.inv-row-estimate {
-    border-color: var(--warn-border);
-    background: var(--warn-soft);
+    box-shadow: inset 3px 0 0 var(--warn);
   }
 
-  .inv-row-estimate td {
-    background: transparent;
+  .invoice-doc-table tbody tr.inv-row-estimate td:first-child {
+    box-shadow: none;
   }
 }

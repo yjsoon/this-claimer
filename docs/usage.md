@@ -43,7 +43,7 @@ GST flag and remark are editable. **Push to Xero (draft)** creates the bill (pay
 "Soon Yin Jie", tax-inclusive), attaches the receipts (merging into combined PDFs
 when over Xero's 3 MB / 10-attachment caps), then presents a separate **Mark
 checked as claimed** action. That action tags the receipts and flips linked
-`TODO:` memos to `CLAIMED:` in their originating backend; creating the draft
+`TODO:` memos to `CLAIMED - YYYY-MM-DD:` in their originating backend; creating the draft
 alone does not change claim memos.
 
 The worker talks to Xero over raw `fetch` (OAuth 2.0; rotating refresh token in the

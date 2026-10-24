@@ -110,7 +110,7 @@ An alternative to Volopay: the receipts.soon.sg **Invoices** tab turns ready-to-
 items into monthly DRAFT bills in Xero (payee "Soon Yin Jie"), split into GST /
 non-GST / transport, with receipts attached. After a push, receipts are tagged
 `xeroInvoiceId` (so they drop off the tab) and the linked YNAB `TODO:` memos become
-`CLAIMED:`.
+`CLAIMED - YYYY-MM-DD:`.
 
 - Worker: `upload-app/worker/xero.ts` (OAuth 2.0 over raw fetch, refresh-token
   rotation in the `XERO_TOKENS` KV namespace, bill creation + attachments) and the
