@@ -892,13 +892,16 @@ function attachTextEditCell(cell, line, field, {
       }
       const changed = parsed !== original;
       line[field] = parsed;
-      // A typed amount replaces HowMuch's figure, including an estimate, unless
-      // it is that same figure.
-      const amountEdit = field === 'amount'
-        ? { amountEdited: !Number.isFinite(line.claimAmount) || cents(parsed) !== cents(line.claimAmount) }
-        : {};
-      Object.assign(line, amountEdit);
-      saveInvoiceEdit(line.id, { [field]: parsed, ...amountEdit });
+      if (field === 'amount' && Number.isFinite(line.claimAmount) && cents(parsed) === cents(line.claimAmount)) {
+        // Typing the claim's own figure back drops the override, so the line
+        // follows HowMuch again (a revised estimate included).
+        line.amountEdited = false;
+        saveInvoiceEdit(line.id, { amount: undefined, amountEdited: undefined });
+      } else {
+        // A typed amount replaces HowMuch's figure, including an estimate.
+        if (field === 'amount') line.amountEdited = true;
+        saveInvoiceEdit(line.id, { [field]: parsed, ...(field === 'amount' ? { amountEdited: true } : {}) });
+      }
       if (changed) reaffirmLineReviewAfterEdit(line, cell);
       activeInvoiceEditCell = null;
       renderDisplay();
