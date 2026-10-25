@@ -387,7 +387,7 @@ function sourceSnapshotsMatch(current, saved) {
   return current.amount === saved.amount
     && current.date === saved.date
     && current.description === saved.description
-    && current.sourceAccount === saved.sourceAccount;
+    && (!Object.hasOwn(saved, 'sourceAccount') || current.sourceAccount === saved.sourceAccount);
 }
 
 function snapshotsMatch(a, b) {
@@ -451,6 +451,15 @@ function applySavedInvoiceEdits(lines) {
         reviewInvalidated: true,
       };
       Object.assign(line, store[line.id]);
+    } else if (!Object.hasOwn(saved.reviewedSourceSnapshot, 'sourceAccount')) {
+      // Preserve valid pre-source-display reviews and baseline the account once,
+      // so later source changes invalidate them without losing existing work.
+      const reviewedSourceSnapshot = {
+        ...store[line.id].reviewedSourceSnapshot,
+        sourceAccount: sourceSnapshot.sourceAccount,
+      };
+      store[line.id].reviewedSourceSnapshot = reviewedSourceSnapshot;
+      line.reviewedSourceSnapshot = reviewedSourceSnapshot;
     }
   });
   writeInvoiceEdits(store);

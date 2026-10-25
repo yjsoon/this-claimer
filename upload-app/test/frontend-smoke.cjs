@@ -693,13 +693,14 @@ async function main() {
       taxType: 'LEGACYTAX',
       section: 'gst',
     };
+    delete entry.reviewedSourceSnapshot.sourceAccount;
     localStorage.setItem('claim_manager_invoice_edits', JSON.stringify(store));
   });
   await page.reload({ waitUntil: 'networkidle' });
   await page.waitForSelector('.invoice-section[data-bucket="nongst"] tr[data-id]');
   const metaAfterReload = await page.locator('.invoice-section[data-bucket="nongst"] .invoice-section-meta').textContent();
   if (!metaAfterReload.includes('1/1 reviewed')) {
-    throw new Error(`review should survive legacy derived snapshot differences, got ${metaAfterReload}`);
+    throw new Error(`review should survive a legacy snapshot without a source account, got ${metaAfterReload}`);
   }
   const disabledAfterReload = await page.locator('.invoice-section[data-bucket="nongst"] .invoice-push-btn').isDisabled();
   if (disabledAfterReload) throw new Error('push should remain enabled after legacy derived snapshot differences');
@@ -713,6 +714,18 @@ async function main() {
   await page.locator('.invoice-section[data-bucket="nongst"] .inv-review-btn').click();
   await partySelect.selectOption('destination');
   assert.equal(await page.locator('.invoice-section[data-bucket="nongst"] .inv-review-btn').getAttribute('aria-pressed'), 'true', 'switching display mode must not invalidate review');
+
+  await page.evaluate(() => {
+    const store = JSON.parse(localStorage.getItem('claim_manager_invoice_edits') || '{}');
+    const entry = store['howmuch::receipt-2.pdf::claim-1'];
+    delete entry.reviewedSourceSnapshot.sourceAccount;
+    entry.reviewedSnapshot.amount = '99.99';
+    localStorage.setItem('claim_manager_invoice_edits', JSON.stringify(store));
+  });
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForSelector('.invoice-section[data-bucket="nongst"] tr[data-id]');
+  assert.equal(await page.locator('.invoice-section[data-bucket="nongst"] .invoice-push-btn').isDisabled(), true, 'legacy migration must not preserve an inconsistent effective review');
+  await page.locator('.invoice-section[data-bucket="nongst"] .inv-review-btn').click();
 
   const sortSelect = page.locator('.invoice-section[data-bucket="nongst"] .invoice-sort-select');
   await sortSelect.selectOption('date-desc');
@@ -741,7 +754,12 @@ async function main() {
   if (await page.locator('.invoice-section[data-bucket="nongst"] .invoice-push-btn').isDisabled()) {
     throw new Error('review after a hand edit should survive reload');
   }
-  // Source data changing underneath a reviewed line still invalidates it.
+  // A legacy snapshot must not hide a real change to previously tracked data.
+  await page.evaluate(() => {
+    const store = JSON.parse(localStorage.getItem('claim_manager_invoice_edits') || '{}');
+    delete store['howmuch::receipt-2.pdf::claim-1'].reviewedSourceSnapshot.sourceAccount;
+    localStorage.setItem('claim_manager_invoice_edits', JSON.stringify(store));
+  });
   invoiceReceipt.taggedAmount = 51;
   invoiceReceipt.taggedAmountSgdApprox = 16;
   todos.find((todo) => todo.id === 'claim-1').amount = 16;
