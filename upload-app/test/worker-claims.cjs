@@ -121,6 +121,53 @@ async function main() {
     const authed = await fetch(`${workerUrl}/ai/settings`, { headers: { 'X-Auth-Token': 'test-auth' } });
     assert.equal(authed.status, 200);
     assert.equal((await authed.json()).providers.length, 3);
+
+    // Invoice overrides are shared, versioned independently from receipt bytes
+    // and AI tags, and stale browsers/agents cannot overwrite a newer edit.
+    const headers = { 'X-Auth-Token': 'test-auth', 'Content-Type': 'application/json' };
+    const form = new FormData();
+    form.append('file', new Blob(['%PDF-1.4\ninvoice fixture'], { type: 'application/pdf' }), 'foodpanda.pdf');
+    const uploaded = await fetch(`${workerUrl}/upload`, {
+      method: 'POST', headers: { 'X-Auth-Token': 'test-auth' }, body: form,
+    }).then(r => r.json());
+    const editUrl = `${workerUrl}/receipt/${encodeURIComponent(uploaded.key)}/invoice-edits`;
+    assert.equal((await fetch(editUrl)).status, 401);
+    const initial = await fetch(editUrl, { headers }).then(r => r.json());
+    assert.deepEqual(initial, { revision: null, lines: {} });
+    const patch = (body) => fetch(editUrl, { method: 'PATCH', headers, body: JSON.stringify(body) });
+    const edit = { backend: 'howmuch', claimId: 'foodpanda-claim', revision: null,
+      patch: { section: 'nongst', gstShown: false, taxType: 'NRINPUT', description: 'ABC meetup #10', amount: 219.30 } };
+    const firstWriters = await Promise.all([patch(edit), patch(edit)]);
+    assert.deepEqual(firstWriters.map(r => r.status).sort(), [200, 409], 'initial creation must also be atomic');
+    const created = firstWriters.find(r => r.status === 200);
+    const shared = await created.json();
+    assert.deepEqual(shared.lines['howmuch::foodpanda-claim'], {
+      ...edit.patch, reviewed: false, reviewedSnapshot: null, reviewedSourceSnapshot: null,
+    });
+    assert.ok(shared.revision);
+    assert.deepEqual(await fetch(editUrl, { headers }).then(r => r.json()), shared);
+    assert.equal((await patch({ ...edit, patch: { taxType: 'INPUTY24' } })).status, 409);
+    const concurrent = await Promise.all([
+      patch({ ...edit, revision: shared.revision, patch: { remark: 'browser A' } }),
+      patch({ ...edit, revision: shared.revision, patch: { remark: 'agent B' } }),
+    ]);
+    assert.deepEqual(concurrent.map(r => r.status).sort(), [200, 409]);
+    const latest = await fetch(editUrl, { headers }).then(r => r.json());
+    assert.equal(latest.lines['howmuch::foodpanda-claim'].taxType, 'NRINPUT');
+    assert.equal((await patch({ ...edit, revision: latest.revision, patch: { taggedGstShown: false } })).status, 400);
+    assert.equal((await patch({ ...edit, revision: latest.revision, patch: { section: 'invalid' } })).status, 400);
+    const otherBackend = await patch({ ...edit, revision: latest.revision, backend: 'ynab', patch: { section: 'gst' } });
+    assert.equal(otherBackend.status, 200);
+    const reset = await patch({ ...edit, revision: (await otherBackend.json()).revision, patch: null });
+    const resetData = await reset.json();
+    assert.deepEqual(resetData.lines['howmuch::foodpanda-claim'], {}, 'reset retains a tombstone against legacy re-import');
+    assert.equal(resetData.lines['ynab::foodpanda-claim'].section, 'gst');
+    const listed = await fetch(`${workerUrl}/list`, { headers }).then(r => r.json());
+    assert.equal(listed.receipts.length, 1, 'override sidecars must not appear as receipts');
+    assert.deepEqual(listed.receipts[0].invoiceEdits, resetData);
+    const bytes = await fetch(`${workerUrl}/receipt/${encodeURIComponent(uploaded.key)}`, { headers }).then(r => r.text());
+    assert.equal(bytes, '%PDF-1.4\ninvoice fixture');
+    console.log('Invoice override API passed (CAS, concurrent writers, backend isolation, reset, listing, receipt preservation)');
     const lines = [lineItem('claim-1', 'First claim'), lineItem('claim-2', 'Second claim')];
     const success = await markClaimed(workerUrl, lines);
     assert.equal(success.response.status, 200, JSON.stringify(success.body));

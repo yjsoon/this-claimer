@@ -18,7 +18,7 @@ import {
   navigateToMode,
   renderInvoiceClaimLoadError,
   renderInvoicesFromLoadedData,
-} from './invoices.js?v=20261015-ai';
+} from './invoices.js?v=20261025-shared-edits';
 
 initTheme();
 initPreview();

@@ -44,6 +44,26 @@ checked as claimed** action. That action tags the receipts and flips linked
 `TODO:` memos to `CLAIMED:` in their originating backend; creating the draft
 alone does not change claim memos.
 
+Manual line edits (including Type/section, tax, account, memo, amount, remark and
+review state) are shared with other browsers and agents on reload or **Refresh**.
+AI GST tags remain the original printed-receipt finding; manual invoice tax
+decisions take priority without rewriting those tags.
+
+Existing browser edits are imported only for lines with no shared overrides, using
+a version-checked write. Once a shared entry exists, it wins over undated browser
+edits, including after a server reset. The original `claim_manager_invoice_edits`
+localStorage entries remain as recovery backups; do not clear browser storage
+until you have checked migration. If different browsers had different old edits,
+the first successful import wins; compare the retained backups before deliberately
+reapplying any missing changes. Backups are not merged over an existing shared line.
+
+On a save failure or conflict, a visible error says the edits are not shared and
+the local backup is kept. Conflicts display the newer shared values rather than
+silently overwriting them. Refresh and deliberately reapply any intended change;
+draft creation is blocked while the current session has unresolved save errors.
+The app does not auto-retry failed edits over newer shared data. Agent API usage:
+[shared invoice overrides](api.md#shared-invoice-line-overrides-agents-and-browsers).
+
 The worker talks to Xero over raw `fetch` (OAuth 2.0; rotating refresh token in the
 `XERO_TOKENS` KV namespace). Setup and usage: `.claude/skills/claim-invoices/SKILL.md`.
 

@@ -137,6 +137,7 @@ async function main() {
       if (url.pathname === '/list') {
         if (!isAuthed) return route.fulfill({ status: 401, json: { error: 'unauthorised' } });
         if (mockState.failReceiptList) return route.fulfill({ status: 500, json: { error: 'list unavailable' } });
+        if (mockState.receipts) return route.fulfill({ json: { receipts: mockState.receipts, hasMore: false } });
         const cursor = url.searchParams.get('cursor');
         const body = cursor === 'page-2'
           ? { receipts: receiptsPageTwo, hasMore: false }
@@ -163,7 +164,20 @@ async function main() {
         const responseTodos = mockState.labelByBackend
           ? todos.map((todo) => ({ ...todo, description: `${backend}: ${todo.description}` }))
           : todos;
-        return route.fulfill({ json: { todos: responseTodos, backend } });
+        return route.fulfill({ json: { todos: mockState.todos || responseTodos, backend } });
+      }
+      if (url.pathname.endsWith('/invoice-edits') && route.request().method() === 'PATCH') {
+        const key = decodeURIComponent(url.pathname.slice('/receipt/'.length, -'/invoice-edits'.length));
+        const receipt = (mockState.receipts || [...receiptsPageOne, ...receiptsPageTwo]).find(item => item.key === key);
+        const current = receipt.invoiceEdits || { revision: null, lines: {} };
+        const body = route.request().postDataJSON();
+        if (mockState.failInvoiceSave) return route.fulfill({ status: 503, json: { error: 'Save unavailable' } });
+        if (body.revision !== current.revision) return route.fulfill({ status: 409, json: { ...current, error: 'Invoice edits changed' } });
+        const id = `${body.backend}::${body.claimId}`;
+        receipt.invoiceEdits = { revision: String(Number(current.revision || 0) + 1), lines: {
+          ...current.lines, [id]: { ...current.lines[id], ...body.patch },
+        } };
+        return route.fulfill({ json: receipt.invoiceEdits });
       }
       if (url.pathname.startsWith('/receipt/') && route.request().method() === 'GET') {
         return route.fulfill({ contentType: 'application/pdf', body: previewPdfBytes });
@@ -694,6 +708,8 @@ async function main() {
   await page.keyboard.press('Escape');
   await taxCell.locator('.inv-cell-text').waitFor();
 
+  // Simulate an existing, pre-server browser review for legacy migration.
+  delete invoiceReceipt.invoiceEdits;
   await page.evaluate(() => {
     const store = JSON.parse(localStorage.getItem('claim_manager_invoice_edits') || '{}');
     const entry = store['howmuch::receipt-2.pdf::claim-1'];
@@ -726,6 +742,7 @@ async function main() {
   await partySelect.selectOption('destination');
   assert.equal(await page.locator('.invoice-section[data-bucket="nongst"] .inv-review-btn').getAttribute('aria-pressed'), 'true', 'switching display mode must not invalidate review');
 
+  delete invoiceReceipt.invoiceEdits;
   await page.evaluate(() => {
     const store = JSON.parse(localStorage.getItem('claim_manager_invoice_edits') || '{}');
     const entry = store['howmuch::receipt-2.pdf::claim-1'];
@@ -890,6 +907,9 @@ async function main() {
   await shortPage.locator('#previewReviewBtn').click();
   await shortPage.waitForSelector('#previewOverlay:not(.active)');
 
+  // Earlier browser contexts now share review state; start this shortcut
+  // scenario explicitly unreviewed rather than relying on empty localStorage.
+  delete invoiceReceipt.invoiceEdits;
   const navigationPage = await browser.newPage();
   await navigationPage.addInitScript(() => {
     localStorage.setItem('claim_manager_auth', 'test');
@@ -943,6 +963,106 @@ async function main() {
     throw new Error(`320px header overflowed: ${JSON.stringify(compactLayout)}`);
   }
   if (!compactLayout.backendVisible) throw new Error('backend selector should be visible on compact Invoices view');
+
+  const foodKey = '2026-10-21_140217_0f8c6339_2026-09-29_foodpanda_219.30.pdf';
+  const foodLineId = `howmuch::${foodKey}::food-claim`;
+  const food = { key: foodKey, originalName: '2026-09-29_foodpanda_219.30.pdf',
+    uploaded: '2026-10-21T14:02:17Z', linkedClaimIds: ['food-claim'], linkedClaimsBackend: 'howmuch',
+    taggedAmount: 219.30, taggedCurrency: 'SGD', taggedGstShown: true, taggedGstAmount: 0.12, taggedGstSource: 'fixture-ai' };
+  const foodState = { receipts: [food], todos: [{ id: 'food-claim', date: '2026-09-29',
+    payee: 'Foodpanda', description: 'ABC meetup #10', amount: 219.30, accountName: 'Personal Visa' }] };
+  const foodPage = async (legacy) => {
+    const p = await browser.newPage({ viewport: { width: 1440, height: 1100 }, deviceScaleFactor: 2 });
+    await p.addInitScript(({ legacy, foodLineId }) => {
+      localStorage.setItem('claim_manager_auth', 'test');
+      localStorage.setItem('claim_manager_remember', 'true');
+      if (legacy) localStorage.setItem('claim_manager_invoice_edits', JSON.stringify({ [foodLineId]: legacy }));
+    }, { legacy, foodLineId });
+    await setupMockApi(p, foodState);
+    await p.goto(`http://127.0.0.1:${port}/invoices`, { waitUntil: 'networkidle' });
+    return p;
+  };
+  const mac = await foodPage({ section: 'nongst', gstShown: false, taxType: 'NRINPUT', remark: 'Platform-fee GST only' });
+  assert.equal(food.invoiceEdits.lines['howmuch::food-claim'].taxType, 'NRINPUT', 'legacy edits should migrate to the server');
+  const other = await foodPage({ section: 'gst', gstShown: true, taxType: 'INPUTY24' });
+  const foodRow = p => p.locator('.invoice-section[data-bucket="nongst"] tr[data-id]');
+  assert.match(await foodRow(other).locator('[data-field="taxType"]').innerText(), /^NRINPUT\b/);
+  assert.match(await foodRow(other).innerText(), /S\$219\.30/);
+  assert.equal(await other.evaluate(id => JSON.parse(localStorage.getItem('claim_manager_invoice_edits'))[id].taxType, foodLineId), 'INPUTY24', 'old local edits remain backed up, but do not beat shared overrides');
+  await foodRow(mac).locator('.inv-description-remark').dblclick();
+  await foodRow(mac).locator('input').fill('Shared platform-fee exception');
+  await Promise.all([
+    mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
+    foodRow(mac).locator('input').press('Enter'),
+  ]);
+  await other.reload({ waitUntil: 'networkidle' });
+  assert.match(await foodRow(other).innerText(), /Shared platform-fee exception/);
+  await Promise.all([
+    other.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
+    foodRow(other).locator('.inv-review-btn').click(),
+  ]);
+  await mac.reload({ waitUntil: 'networkidle' });
+  assert.equal(await foodRow(mac).locator('.inv-review-btn').getAttribute('aria-pressed'), 'true', 'review state syncs across browser contexts');
+  if (process.env.SCREENSHOT_DIR) {
+    fs.mkdirSync(process.env.SCREENSHOT_DIR, { recursive: true });
+    await mac.screenshot({ path: path.join(process.env.SCREENSHOT_DIR, 'invoice-shared-nongst.png') });
+  }
+  // Simulate an agent editing after this browser's last read.
+  food.invoiceEdits = { revision: '100', lines: { 'howmuch::food-claim': {
+    section: 'nongst', gstShown: false, taxType: 'NRINPUT', remark: 'Newer agent decision',
+  } } };
+  await foodRow(other).locator('[data-field="section"]').click();
+  await foodRow(other).locator('select').selectOption('gst');
+  await other.waitForFunction(() => document.querySelector('#status').textContent.includes('Local backup kept'));
+  await foodRow(other).waitFor();
+  assert.match(await foodRow(other).innerText(), /Newer agent decision/);
+  assert.equal(food.invoiceEdits.revision, '100', 'stale write must not replace agent state');
+  assert.equal(await other.evaluate(id => JSON.parse(localStorage.getItem('claim_manager_invoice_edits'))[id].section, foodLineId), 'gst');
+  if (process.env.SCREENSHOT_DIR) await other.screenshot({ path: path.join(process.env.SCREENSHOT_DIR, 'invoice-shared-conflict.png') });
+  await other.reload({ waitUntil: 'networkidle' });
+  foodState.failInvoiceSave = true;
+  await foodRow(other).locator('[data-field="section"]').click();
+  await foodRow(other).locator('select').selectOption('gst');
+  await other.waitForFunction(() => document.querySelector('#status').textContent.includes('Save unavailable'));
+  assert.equal(food.invoiceEdits.revision, '100');
+  await other.locator('.invoice-section[data-bucket="gst"] .inv-review-btn').click();
+  await other.locator('.invoice-section[data-bucket="gst"] .invoice-push-btn').click();
+  await other.waitForFunction(() => document.querySelector('#status').textContent.includes('resolve them before pushing'));
+  await other.reload({ waitUntil: 'networkidle' });
+  await foodRow(other).waitFor();
+  // A reset tombstone must ignore old browser overrides, then a deliberate
+  // Type edit must persist the complete normalized tax/account decision.
+  foodState.failInvoiceSave = false;
+  food.invoiceEdits = { revision: '101', lines: { 'howmuch::food-claim': {} } };
+  await mac.reload({ waitUntil: 'networkidle' });
+  const gstRow = mac.locator('.invoice-section[data-bucket="gst"] tr[data-id]');
+  await gstRow.waitFor();
+  await gstRow.locator('[data-field="section"]').click();
+  await Promise.all([
+    mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
+    gstRow.locator('select').selectOption('nongst'),
+  ]);
+  assert.equal(food.invoiceEdits.lines['howmuch::food-claim'].section, 'nongst');
+  assert.equal(food.invoiceEdits.lines['howmuch::food-claim'].gstShown, false);
+  assert.equal(food.invoiceEdits.lines['howmuch::food-claim'].taxType, 'NRINPUT');
+  await other.reload({ waitUntil: 'networkidle' });
+  await foodRow(other).waitFor();
+  assert.equal(food.taggedGstShown, true);
+  assert.equal(food.taggedGstAmount, 0.12);
+  assert.equal(food.taggedGstSource, 'fixture-ai');
+  await Promise.all([
+    mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
+    foodRow(mac).locator('.inv-review-btn').click(),
+  ]);
+  foodState.todos[0].amount = 220.30;
+  await other.reload({ waitUntil: 'networkidle' });
+  assert.equal(food.invoiceEdits.lines['howmuch::food-claim'].reviewed, false, 'source changes must persist review invalidation');
+  foodState.todos[0].amount = 219.30;
+  await mac.reload({ waitUntil: 'networkidle' });
+  assert.equal(await foodRow(mac).locator('.inv-review-btn').getAttribute('aria-pressed'), 'false', 'an old review must not resurrect when source data reverts');
+  await mac.close();
+  await other.close();
+  console.log('Shared Foodpanda overrides passed (legacy migration, stale local backup, two browsers, review, agent conflict, failed save, unchanged AI GST)');
 
   await browser.close();
   server.close();

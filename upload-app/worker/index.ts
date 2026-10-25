@@ -6,6 +6,7 @@ import * as gmail from './gmail';
 import * as ai from './ai';
 import { verifyAccess, safeEqual } from './access';
 import { PDFDocument } from 'pdf-lib';
+import { INVOICE_EDITS_PREFIX, readInvoiceEdits, invoiceEditsResponse, type InvoiceEdits } from './invoice-edits';
 
 const assetManifest = JSON.parse(manifestJSON);
 
@@ -271,6 +272,7 @@ interface ReceiptSummary {
   taggedGstAmount?: number;
   taggedGstConfidence?: number;
   taggedGstSource?: string;
+  invoiceEdits?: InvoiceEdits;
   // Set once the linked YNAB claim has been marked claimed for this bill.
   xeroInvoiceId?: string;
   invoicedAt?: string;
@@ -618,7 +620,7 @@ async function listReceiptSummaries(
   let headFallbacks = 0;
 
   const receipts = await mapWithConcurrency(
-    listed.objects,
+    listed.objects.filter(obj => !obj.key.startsWith(INVOICE_EDITS_PREFIX)),
     RECEIPT_METADATA_CONCURRENCY,
     async (obj): Promise<ReceiptSummary> => {
       // Fall back to head() only if the runtime ignored `include`.
@@ -672,6 +674,7 @@ async function listReceiptSummaries(
         taggedGstAmount: parseMetadataNumber(metadata.taggedGstAmount),
         taggedGstConfidence: parseMetadataNumber(metadata.taggedGstConfidence),
         taggedGstSource: metadata.taggedGstSource,
+        invoiceEdits: await readInvoiceEdits(env.RECEIPTS, obj.key),
         xeroInvoiceId: metadata.xeroInvoiceId,
         invoicedAt: metadata.invoicedAt,
         xeroPendingInvoiceId: metadata.xeroPendingInvoiceId,
@@ -1231,6 +1234,7 @@ async function tagPendingGst(env: Env, limit: number): Promise<{
   let remaining = 0;
 
   for (const object of listed.objects) {
+    if (object.key.startsWith(INVOICE_EDITS_PREFIX)) continue;
     const head = await env.RECEIPTS.head(object.key);
     const metadata = head?.customMetadata || {};
     if (metadata.xeroInvoiceId) continue;
@@ -1396,6 +1400,7 @@ async function tagPendingReceipts(env: Env, limit: number): Promise<{
   const candidateKeys: string[] = [];
 
   for (const object of listed.objects) {
+    if (object.key.startsWith(INVOICE_EDITS_PREFIX)) continue;
     const head = await env.RECEIPTS.head(object.key);
     const metadata = head?.customMetadata || {};
     const linkedClaimIds = parseLinkedClaimIds(metadata.linkedClaimIds, metadata.linkedClaimId);
@@ -2142,6 +2147,19 @@ export default {
 
     try {
       // API routes
+      // Sidecars are internal records, never receipt downloads or tag targets.
+      if (path.startsWith('/receipt/') && decodeURIComponent(path.slice('/receipt/'.length)).startsWith(INVOICE_EDITS_PREFIX)) {
+        return Response.json({ error: 'Receipt not found' }, { status: 404, headers: corsHeaders });
+      }
+      if (path.startsWith('/receipt/') && path.endsWith('/invoice-edits')
+        && ['GET', 'PATCH'].includes(request.method)) {
+        const key = decodeURIComponent(path.slice('/receipt/'.length, -'/invoice-edits'.length));
+        const response = await invoiceEditsResponse(request, env.RECEIPTS, key);
+        return new Response(response.body, {
+          status: response.status,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+        });
+      }
       // POST /upload - Upload a receipt
       if (path === '/upload' && request.method === 'POST') {
         const formData = await request.formData();
