@@ -137,7 +137,11 @@ async function main() {
       if (url.pathname === '/list') {
         if (!isAuthed) return route.fulfill({ status: 401, json: { error: 'unauthorised' } });
         if (mockState.failReceiptList) return route.fulfill({ status: 500, json: { error: 'list unavailable' } });
-        if (mockState.receipts) return route.fulfill({ json: { receipts: mockState.receipts, hasMore: false } });
+        if (mockState.receipts) {
+          const body = JSON.parse(JSON.stringify({ receipts: mockState.receipts, hasMore: false }));
+          if (mockState.holdList) await mockState.holdList();
+          return route.fulfill({ json: body });
+        }
         const cursor = url.searchParams.get('cursor');
         const body = cursor === 'page-2'
           ? { receipts: receiptsPageTwo, hasMore: false }
@@ -169,14 +173,18 @@ async function main() {
       if (url.pathname.endsWith('/invoice-edits') && route.request().method() === 'PATCH') {
         const key = decodeURIComponent(url.pathname.slice('/receipt/'.length, -'/invoice-edits'.length));
         const receipt = (mockState.receipts || [...receiptsPageOne, ...receiptsPageTwo]).find(item => item.key === key);
-        const current = receipt.invoiceEdits || { revision: null, lines: {} };
         const body = route.request().postDataJSON();
-        if (mockState.failInvoiceSave) return route.fulfill({ status: 503, json: { error: 'Save unavailable' } });
+        if (mockState.holdInvoiceSave) await mockState.holdInvoiceSave(body);
+        const current = receipt.invoiceEdits || { revision: null, lines: {} };
+        if (mockState.failInvoiceSave || mockState.failInvoiceClaimId === body.claimId) return route.fulfill({ status: 503, json: { error: 'Save unavailable' } });
         if (body.revision !== current.revision) return route.fulfill({ status: 409, json: { ...current, error: 'Invoice edits changed' } });
         const id = `${body.backend}::${body.claimId}`;
         receipt.invoiceEdits = { revision: String(Number(current.revision || 0) + 1), lines: {
           ...current.lines, [id]: { ...current.lines[id], ...body.patch },
         } };
+        if (Object.keys(body.patch).some(field => !field.startsWith('review')) && !Object.hasOwn(body.patch, 'reviewed')) {
+          Object.assign(receipt.invoiceEdits.lines[id], { reviewed: false, reviewedSnapshot: null, reviewedSourceSnapshot: null });
+        }
         return route.fulfill({ json: receipt.invoiceEdits });
       }
       if (url.pathname.startsWith('/receipt/') && route.request().method() === 'GET') {
@@ -1003,6 +1011,45 @@ async function main() {
   ]);
   await mac.reload({ waitUntil: 'networkidle' });
   assert.equal(await foodRow(mac).locator('.inv-review-btn').getAttribute('aria-pressed'), 'true', 'review state syncs across browser contexts');
+
+  const beforeNoOps = food.invoiceEdits.revision;
+  for (const field of ['description', 'remark', 'date', 'amount']) {
+    const cell = foodRow(mac).locator(`[data-field="${field}"]`);
+    if (field === 'description' || field === 'remark') await cell.dblclick();
+    else await cell.click();
+    await cell.locator('input').press('Enter');
+  }
+  for (const field of ['accountCode', 'taxType']) {
+    await foodRow(mac).locator(`[data-field="${field}"]`).click();
+    await mac.keyboard.press('Tab');
+    await foodRow(mac).locator(`[data-field="${field}"] select`).waitFor({ state: 'detached' });
+  }
+  await mac.waitForLoadState('networkidle');
+  assert.equal(food.invoiceEdits.revision, beforeNoOps, 'unchanged field commits must not write or erase shared review');
+  assert.equal(food.invoiceEdits.lines['howmuch::food-claim'].reviewed, true);
+
+  let releaseList;
+  const listGate = new Promise(resolve => { releaseList = resolve; });
+  const listStarted = new Promise(resolve => {
+    foodState.holdList = async () => { resolve(); await listGate; };
+  });
+  await mac.locator('#invoicesRefreshBtn').click();
+  await listStarted;
+  // Busy styling blocks pointer events, but review buttons remain keyboard-focusable.
+  await foodRow(mac).locator('.inv-review-btn').focus();
+  await Promise.all([
+    mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
+    mac.keyboard.press('Enter'),
+  ]);
+  delete foodState.holdList;
+  releaseList();
+  await mac.waitForFunction(() => !document.querySelector('#invoicesSections').hasAttribute('aria-busy'));
+  assert.equal(await foodRow(mac).locator('.inv-review-btn').getAttribute('aria-pressed'), 'false', 'a delayed list must not replace a newer completed edit');
+  await Promise.all([
+    mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
+    foodRow(mac).locator('.inv-review-btn').click(),
+  ]);
+
   if (process.env.SCREENSHOT_DIR) {
     fs.mkdirSync(process.env.SCREENSHOT_DIR, { recursive: true });
     await mac.screenshot({ path: path.join(process.env.SCREENSHOT_DIR, 'invoice-shared-nongst.png') });
@@ -1019,6 +1066,15 @@ async function main() {
   assert.equal(food.invoiceEdits.revision, '100', 'stale write must not replace agent state');
   assert.equal(await other.evaluate(id => JSON.parse(localStorage.getItem('claim_manager_invoice_edits'))[id].section, foodLineId), 'gst');
   if (process.env.SCREENSHOT_DIR) await other.screenshot({ path: path.join(process.env.SCREENSHOT_DIR, 'invoice-shared-conflict.png') });
+  foodState.failReceiptList = true;
+  await other.locator('#invoicesRefreshBtn').click();
+  await other.waitForFunction(() => !document.querySelector('#invoicesSections').hasAttribute('aria-busy'));
+  assert.match(await foodRow(other).innerText(), /Newer agent decision/, 'failed refresh must retain the last known conflict state');
+  assert.equal(await foodRow(other).locator('.inv-review-btn').getAttribute('aria-pressed'), 'false');
+  await foodRow(other).locator('.inv-review-btn').click();
+  await other.locator('.invoice-section[data-bucket="nongst"] .invoice-push-btn').click();
+  await other.waitForFunction(() => document.querySelector('#status').textContent.includes('resolve them before pushing'));
+  delete foodState.failReceiptList;
   await other.reload({ waitUntil: 'networkidle' });
   foodState.failInvoiceSave = true;
   await foodRow(other).locator('[data-field="section"]').click();
@@ -1060,6 +1116,57 @@ async function main() {
   foodState.todos[0].amount = 219.30;
   await mac.reload({ waitUntil: 'networkidle' });
   assert.equal(await foodRow(mac).locator('.inv-review-btn').getAttribute('aria-pressed'), 'false', 'an old review must not resurrect when source data reverts');
+
+  food.linkedClaimIds.push('food-sibling');
+  foodState.todos.push({ ...foodState.todos[0], id: 'food-sibling', description: 'Second linked claim' });
+  await mac.reload({ waitUntil: 'networkidle' });
+  const siblingRow = mac.locator(`tr[data-id="howmuch::${foodKey}::food-sibling"]`);
+  const firstRow = mac.locator(`tr[data-id="${foodLineId}"]`);
+  let releaseSave;
+  const saveGate = new Promise(resolve => { releaseSave = resolve; });
+  const saveStarted = new Promise(resolve => {
+    foodState.holdInvoiceSave = async body => {
+      if (body.claimId === 'food-claim') { resolve(); await saveGate; }
+    };
+  });
+  foodState.failInvoiceClaimId = 'food-claim';
+  await firstRow.locator('.inv-description-remark').dblclick();
+  await firstRow.locator('input').fill('Failed first-line edit');
+  await firstRow.locator('input').press('Enter');
+  await saveStarted;
+  await siblingRow.locator('.inv-description-remark').dblclick();
+  await siblingRow.locator('input').fill('Keep sibling edit');
+  await siblingRow.locator('input').press('Enter');
+  const siblingSaved = mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.request().postDataJSON().claimId === 'food-sibling' && r.status() === 200, { timeout: 5000 });
+  releaseSave();
+  await siblingSaved;
+  assert.equal(food.invoiceEdits.lines['howmuch::food-sibling'].remark, 'Keep sibling edit', 'one failed line must not discard sibling writes');
+  delete foodState.failInvoiceClaimId;
+  delete foodState.holdInvoiceSave;
+  await mac.reload({ waitUntil: 'networkidle' });
+  let releaseConflict;
+  const conflictGate = new Promise(resolve => { releaseConflict = resolve; });
+  const conflictStarted = new Promise(resolve => {
+    foodState.holdInvoiceSave = async body => {
+      if (body.claimId === 'food-claim') { resolve(); await conflictGate; }
+    };
+  });
+  await firstRow.locator('.inv-description-remark').dblclick();
+  await firstRow.locator('input').fill('Stale first edit');
+  await firstRow.locator('input').press('Enter');
+  await conflictStarted;
+  await siblingRow.locator('.inv-description-remark').dblclick();
+  await siblingRow.locator('input').fill('Stale sibling edit');
+  await siblingRow.locator('input').press('Enter');
+  food.invoiceEdits = { revision: '200', lines: {
+    'howmuch::food-claim': { section: 'nongst', remark: 'Agent first decision' },
+    'howmuch::food-sibling': { section: 'nongst', remark: 'Agent sibling decision' },
+  } };
+  const siblingConflict = mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.request().postDataJSON().claimId === 'food-sibling' && r.status() === 409);
+  releaseConflict();
+  await siblingConflict;
+  await mac.waitForFunction(() => document.querySelector('#invoicesSections').textContent.includes('Agent sibling decision'));
+  assert.equal(food.invoiceEdits.revision, '200', 'queued siblings must not silently rebase onto a conflict revision');
   await mac.close();
   await other.close();
   console.log('Shared Foodpanda overrides passed (legacy migration, stale local backup, two browsers, review, agent conflict, failed save, unchanged AI GST)');

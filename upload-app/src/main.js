@@ -6,7 +6,7 @@ import {
   loadReceipts,
   loadYnabTodos,
   setOnClaimsLoadError,
-} from './claims.js?v=20261015-ai';
+} from './claims.js?v=20261025-shared-edits';
 import { initGmail, loadGmailStatus, setOnGmailImported } from './gmail.js?v=20261015-ai';
 import { initSettings } from './settings.js?v=20261015-ai';
 import { initAiSettings, loadAiSettings, refreshAiSettings } from './ai.js?v=20261015-ai';

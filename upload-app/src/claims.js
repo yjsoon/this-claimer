@@ -307,7 +307,7 @@ export async function loadReceipts() {
     const receipts = await fetchAllReceipts();
     if (!receipts) {
       scheduleMatchSuggestionRefresh();
-      return;
+      return false;
     }
 
     // Sort: unlinked first, then linked.
@@ -341,7 +341,7 @@ export async function loadReceipts() {
       updateUploadZoneCompact();
       triggerPendingAmountTagging();
       scheduleMatchSuggestionRefresh();
-      return;
+      return true;
     }
 
     receiptList.innerHTML = outstandingReceipts
@@ -457,10 +457,12 @@ export async function loadReceipts() {
     updateUploadZoneCompact();
     triggerPendingAmountTagging();
     scheduleMatchSuggestionRefresh();
+    return true;
   } catch (err) {
     console.error('Failed to load receipts:', err);
     receiptList.innerHTML = '<li class="empty-state">Failed to load receipts</li>';
     scheduleMatchSuggestionRefresh();
+    return false;
   }
 }
 
