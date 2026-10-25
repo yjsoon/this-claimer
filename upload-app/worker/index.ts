@@ -429,26 +429,38 @@ function getDefaultYnabSinceDate(): string {
 // capitals or before a colon, and can lead a TODO memo ("TOCHECK TODO: Taxi").
 const TOCHECK_WORD = /^\s*(TOCHECK)\b(:?)\s*/i;
 
-function leadingToCheck(memo: string): { toCheck: boolean; rest: string } {
-  let rest = memo;
+// The follow-up words a memo starts with, in any order, and the text after
+// them. TODO uses this tool's memo rule (any case before a colon or space, or
+// just "TODO"); with `strict`, HowMuch's rule (capitals, or any case before a
+// colon), for rows HowMuch already holds in its field.
+function leadingWords(memo: string, strict = false): { todo: boolean; toCheck: boolean; rest: string } {
+  let rest = memo.trimStart();
+  let todo = false;
   let toCheck = false;
-  for (let match = TOCHECK_WORD.exec(rest); match; match = TOCHECK_WORD.exec(rest)) {
-    if (match[1] !== 'TOCHECK' && match[2] !== ':') break;
-    toCheck = true;
-    rest = rest.slice(match[0].length);
+  for (;;) {
+    const check = TOCHECK_WORD.exec(rest);
+    if (check && (check[1] === 'TOCHECK' || check[2] === ':')) {
+      toCheck = true;
+      rest = rest.slice(check[0].length);
+      continue;
+    }
+    const isTodo = strict
+      ? /^TODO(?=[:\s]|$)/.test(rest) || /^todo:/i.test(rest)
+      : /^TODO[:\s]/i.test(rest) || rest === 'TODO';
+    if (!todo && isTodo) {
+      todo = true;
+      rest = rest.replace(/^TODO(?::\s*|\s+|$)/i, '');
+      continue;
+    }
+    return { todo, toCheck, rest };
   }
-  return { toCheck, rest };
 }
 
 function parseTodoDescription(memo: string | null | undefined): string | null {
   if (!memo) return null;
-  const { rest } = leadingToCheck(memo);
-  const text = rest.trimStart();
-  // A bare word counts only in capitals, as in HowMuch, so a memo of just
-  // "todo" stays text.
-  if (!/^TODO[:\s]/i.test(text) && text !== 'TODO') return null;
-  const description = text.replace(/^TODO(?:[:\s]\s*|$)/i, '').trim();
-  return description || 'Claim';
+  const words = leadingWords(memo);
+  if (!words.todo) return null;
+  return words.rest.trim() || 'Claim';
 }
 
 // The claim description for a transaction, or null when it is not a claim.
@@ -456,7 +468,8 @@ function parseTodoDescription(memo: string | null | undefined): string | null {
 // without it (YNAB, older HowMuch, HowMuch rows still carrying their TODO
 // word) keep the TODO memo convention.
 function transactionClaimDescription(transaction: YnabTransaction): string | null {
-  if (transaction.claim_status === 'to_claim') return (transaction.memo || '').trim() || 'Claim';
+  // A word left in a flagged row's memo is not part of its description.
+  if (transaction.claim_status === 'to_claim') return leadingWords(transaction.memo || '', true).rest.trim() || 'Claim';
   if (transaction.claim_status === 'claimed') return null;
   return parseTodoDescription(transaction.memo);
 }
@@ -493,7 +506,7 @@ function toYnabTodoFromTransaction(transaction: YnabTransaction, rowIds: Set<str
 // A HowMuch row still carrying its words ("TOCHECK TODO: Taxi") holds the
 // estimate marker in the memo, not in needs_confirmation.
 function legacyToCheck(transaction: YnabTransaction): boolean {
-  return transaction.claim_status == null && !!transaction.memo && leadingToCheck(transaction.memo).toCheck;
+  return transaction.claim_status == null && !!transaction.memo && leadingWords(transaction.memo).toCheck;
 }
 
 function toYnabTodoFromSubtransaction(parent: YnabTransaction, subtransaction: YnabSubtransaction): YnabTodo | null {
