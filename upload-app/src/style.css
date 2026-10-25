@@ -397,6 +397,7 @@ h2 > span {
 .claim-filter-input,
 .backend-picker select,
 .invoice-sort-select,
+.invoice-party-select,
 .inv-edit-input,
 .inv-edit-select,
 .gmail-input,
@@ -414,6 +415,7 @@ h2 > span {
 .claim-filter-input:focus,
 .backend-picker select:focus,
 .invoice-sort-select:focus,
+.invoice-party-select:focus,
 .inv-edit-input:focus,
 .inv-edit-select:focus,
 .gmail-input:focus,
@@ -2091,6 +2093,7 @@ body.selecting .claims-view {
 .invoice-section-tools {
   display: flex;
   justify-content: flex-end;
+  gap: 12px;
   margin: 0;
 }
 
@@ -2122,7 +2125,8 @@ body.selecting .claims-view {
   font-weight: 500;
 }
 
-.invoice-sort-select {
+.invoice-sort-select,
+.invoice-party-select {
   min-height: 30px;
   padding: 3px 9px;
   font-size: 0.8rem;
@@ -3014,6 +3018,7 @@ body.selecting .claims-view {
 
   .invoice-section-tools {
     justify-content: stretch;
+    flex-direction: column;
   }
 
   .invoice-sort-label {
@@ -3021,7 +3026,8 @@ body.selecting .claims-view {
     justify-content: space-between;
   }
 
-  .invoice-sort-select {
+  .invoice-sort-select,
+  .invoice-party-select {
     min-height: 40px;
     max-width: 68%;
     font-size: 16px;
@@ -3175,7 +3181,6 @@ body.selecting .claims-view {
     padding-top: 6px;
   }
 
-  .invoice-doc-table tbody td.inv-cell-payee::before,
   .invoice-doc-table tbody td.inv-cell-memo::before,
   .invoice-doc-table tbody td.inv-cell-amount::before,
   .invoice-doc-table tbody td.col-actions::before,
@@ -3321,6 +3326,16 @@ body.selecting .claims-view {
 
   .backend-picker select {
     max-width: 120px;
+  }
+}
+
+@media (max-width: 360px) {
+  .app-header-row {
+    column-gap: 4px;
+  }
+
+  .app-header-controls {
+    gap: 4px;
   }
 }
 

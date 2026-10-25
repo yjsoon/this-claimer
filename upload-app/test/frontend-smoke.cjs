@@ -77,7 +77,7 @@ const todos = [
     payee: 'Vendor B',
     description: 'Subscription',
     amount: 15,
-    accountName: 'Work Refundables',
+    accountName: 'Personal Visa',
     sourceUrl: 'https://howmuch.example/transactions?plan=plan-1&transaction=claim-1',
   },
   {
@@ -504,10 +504,23 @@ async function main() {
   assert.equal(await sourceLink.textContent(), 'HowMuch');
   assert.equal(await sourceLink.getAttribute('href'), 'https://howmuch.example/transactions?plan=plan-1&transaction=claim-1');
   assert.equal(await sourceLink.getAttribute('target'), '_blank');
+  const partyCell = page.locator('.invoice-section[data-bucket="nongst"] .inv-cell-payee');
+  const partySelect = page.locator('.invoice-section[data-bucket="nongst"]').getByRole('combobox', { name: 'Show' });
+  assert.equal(await partyCell.textContent(), 'Personal Visa', 'show the source account by default');
+  assert.equal(await partyCell.getAttribute('data-label'), 'Source');
+  assert.notEqual(await partyCell.evaluate(cell => getComputedStyle(cell, '::before').display), 'none', 'mobile cards must identify the displayed party even when the selector is offscreen');
+  await partySelect.selectOption('destination');
   assert.equal(
-    await page.locator('.invoice-section[data-bucket="nongst"] .inv-description-payee').textContent(),
+    await partyCell.textContent(),
     'Vendor B',
+    'destination shows the original payee, including non-transfers',
   );
+  assert.equal(await partyCell.getAttribute('data-label'), 'Destination');
+  assert.equal(await page.locator('.invoice-section[data-bucket="nongst"] th.col-payee').textContent(), 'Destination');
+  assert.deepEqual(await page.locator('.invoice-party-select').evaluateAll(selects => selects.map(select => select.value)), ['destination', 'destination', 'destination']);
+  await partySelect.selectOption('source');
+  assert.equal(await partyCell.textContent(), 'Personal Visa');
+  console.log('Invoice source/destination display passed (default source, destination, labels, synchronized sections, switch back)');
   assert.equal(
     await page.locator('.invoice-section[data-bucket="nongst"] .inv-description-memo').evaluate((element) => element.closest('td')?.className),
     'inv-cell-memo',
@@ -680,16 +693,39 @@ async function main() {
       taxType: 'LEGACYTAX',
       section: 'gst',
     };
+    delete entry.reviewedSourceSnapshot.sourceAccount;
     localStorage.setItem('claim_manager_invoice_edits', JSON.stringify(store));
   });
   await page.reload({ waitUntil: 'networkidle' });
   await page.waitForSelector('.invoice-section[data-bucket="nongst"] tr[data-id]');
   const metaAfterReload = await page.locator('.invoice-section[data-bucket="nongst"] .invoice-section-meta').textContent();
   if (!metaAfterReload.includes('1/1 reviewed')) {
-    throw new Error(`review should survive legacy derived snapshot differences, got ${metaAfterReload}`);
+    throw new Error(`review should survive a legacy snapshot without a source account, got ${metaAfterReload}`);
   }
   const disabledAfterReload = await page.locator('.invoice-section[data-bucket="nongst"] .invoice-push-btn').isDisabled();
   if (disabledAfterReload) throw new Error('push should remain enabled after legacy derived snapshot differences');
+
+  todos[0].accountName = 'Personal Mastercard';
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForSelector('.invoice-section[data-bucket="nongst"] tr[data-id]');
+  assert.equal(await partyCell.textContent(), 'Personal Mastercard');
+  assert.equal(await page.locator('.invoice-section[data-bucket="nongst"] .inv-review-btn').getAttribute('aria-pressed'), 'false', 'changing only the source account must invalidate review');
+  assert.equal(await page.locator('.invoice-section[data-bucket="nongst"] .invoice-push-btn').isDisabled(), true);
+  await page.locator('.invoice-section[data-bucket="nongst"] .inv-review-btn').click();
+  await partySelect.selectOption('destination');
+  assert.equal(await page.locator('.invoice-section[data-bucket="nongst"] .inv-review-btn').getAttribute('aria-pressed'), 'true', 'switching display mode must not invalidate review');
+
+  await page.evaluate(() => {
+    const store = JSON.parse(localStorage.getItem('claim_manager_invoice_edits') || '{}');
+    const entry = store['howmuch::receipt-2.pdf::claim-1'];
+    delete entry.reviewedSourceSnapshot.sourceAccount;
+    entry.reviewedSnapshot.amount = '99.99';
+    localStorage.setItem('claim_manager_invoice_edits', JSON.stringify(store));
+  });
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForSelector('.invoice-section[data-bucket="nongst"] tr[data-id]');
+  assert.equal(await page.locator('.invoice-section[data-bucket="nongst"] .invoice-push-btn').isDisabled(), true, 'legacy migration must not preserve an inconsistent effective review');
+  await page.locator('.invoice-section[data-bucket="nongst"] .inv-review-btn').click();
 
   const sortSelect = page.locator('.invoice-section[data-bucket="nongst"] .invoice-sort-select');
   await sortSelect.selectOption('date-desc');
@@ -718,7 +754,12 @@ async function main() {
   if (await page.locator('.invoice-section[data-bucket="nongst"] .invoice-push-btn').isDisabled()) {
     throw new Error('review after a hand edit should survive reload');
   }
-  // Source data changing underneath a reviewed line still invalidates it.
+  // A legacy snapshot must not hide a real change to previously tracked data.
+  await page.evaluate(() => {
+    const store = JSON.parse(localStorage.getItem('claim_manager_invoice_edits') || '{}');
+    delete store['howmuch::receipt-2.pdf::claim-1'].reviewedSourceSnapshot.sourceAccount;
+    localStorage.setItem('claim_manager_invoice_edits', JSON.stringify(store));
+  });
   invoiceReceipt.taggedAmount = 51;
   invoiceReceipt.taggedAmountSgdApprox = 16;
   todos.find((todo) => todo.id === 'claim-1').amount = 16;
