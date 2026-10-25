@@ -83,7 +83,6 @@ const receiptBadge = document.getElementById('receiptBadge');
 const claimBadge = document.getElementById('claimBadge');
 const linkedList = document.getElementById('linkedList');
 const linkedCount = document.getElementById('linkedCount');
-const invoicesNavBadge = document.getElementById('invoicesNavBadge');
 
 // Linking state
 let sourceReceiptKey = null;
@@ -628,22 +627,14 @@ function countReadyToClaimPairs() {
   return count;
 }
 
-function updateInvoicesNavBadge() {
-  if (!invoicesNavBadge) return;
-  const count = countReadyToClaimPairs();
-  if (count > 0) {
-    invoicesNavBadge.textContent = String(count);
-    invoicesNavBadge.hidden = false;
-  } else {
-    invoicesNavBadge.hidden = true;
-  }
-}
+let onReadyClaimsChange = () => {};
+export function setOnReadyClaimsChange(fn) { onReadyClaimsChange = fn; }
 
 function renderLinkedPairs() {
   if (claimsLoadErrorMessage) {
     linkedCount.textContent = '(error)';
     linkedList.innerHTML = '<li class="empty-state">Claims unavailable</li>';
-    updateInvoicesNavBadge();
+    onReadyClaimsChange();
     return;
   }
 
@@ -673,7 +664,7 @@ function renderLinkedPairs() {
   });
 
   linkedCount.textContent = `(${linkedPairs.length})`;
-  updateInvoicesNavBadge();
+  onReadyClaimsChange();
 
   if (linkedPairs.length === 0) {
     linkedList.innerHTML = '<li class="empty-state">No linked claim-receipt pairs yet</li>';

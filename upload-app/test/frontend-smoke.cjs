@@ -1227,6 +1227,111 @@ async function main() {
   await other.close();
   console.log('Shared Foodpanda overrides passed (legacy migration, stale local backup, two browsers, review, agent conflict, failed save, unchanged AI GST)');
 
+  const badgePage = await browser.newPage();
+  await badgePage.addInitScript(() => {
+    localStorage.setItem('claim_manager_auth', 'test');
+    localStorage.setItem('claim_manager_remember', 'true');
+  });
+  const badgeState = {
+    receipts: [
+      { key: 'two-claims.pdf', linkedClaimIds: ['claim-1', 'claim-2'], linkedClaimsBackend: 'howmuch' },
+      { key: 'ready.pdf', linkedClaimId: 'receipt-ready:ready.pdf', taggedAmount: 8, taggedCurrency: 'SGD' },
+      { key: 'no-amount.pdf', linkedClaimId: 'receipt-ready:no-amount.pdf' },
+      { key: 'stale.pdf', linkedClaimId: 'no-longer-pending', linkedClaimsBackend: 'howmuch' },
+      { key: 'other-backend.pdf', linkedClaimId: 'claim-1', linkedClaimsBackend: 'ynab' },
+      { key: 'billed.pdf', linkedClaimId: 'claim-1', linkedClaimsBackend: 'howmuch', xeroInvoiceId: 'already-billed' },
+    ],
+  };
+  await setupMockApi(badgePage, badgeState);
+  await badgePage.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'networkidle' });
+  assert.equal(await badgePage.locator('#invoicesNavBadge').textContent(), '3',
+    'badge should count submittable bill lines, including multiple claims per receipt and ready-only items, not stale, other-backend, billed or amountless links');
+  await badgePage.locator('#navInvoices').click();
+  await badgePage.waitForSelector('.invoice-section tr[data-id]');
+  assert.equal(await badgePage.locator('#invoicesNavBadge').textContent(), '3');
+  assert.equal(await badgePage.locator('.invoice-section tr[data-id]').count(), 3);
+  // A Gmail/amount-tagging refresh must not detach row editors from the submitted model.
+  await badgePage.locator('.invoice-section .inv-preview-btn').first().click();
+  await badgePage.waitForSelector('#previewOverlay.active');
+  await badgePage.evaluate(async () => {
+    const { loadReceipts } = await import('/claims.js?v=20261025-shared-edits');
+    await loadReceipts();
+  });
+  await badgePage.waitForSelector('#previewOverlay:not(.active)');
+  const readyRow = badgePage.locator('tr[data-id="ynab::ready.pdf::receipt-ready:ready.pdf"]');
+  await readyRow.locator('[data-field="amount"]').click();
+  await readyRow.locator('[data-field="amount"] input').fill('13');
+  await badgePage.keyboard.press('Enter');
+  await readyRow.locator('.inv-preview-btn').click();
+  await badgePage.locator('#previewReviewBtn').click();
+  const unreviewedRows = badgePage.locator('.invoice-section .inv-review-btn[aria-pressed="false"]');
+  while (await unreviewedRows.count()) await unreviewedRows.first().click();
+  const badgePush = badgePage.locator('.invoice-section[data-bucket="nongst"] .invoice-push-btn');
+  assert.equal(await badgePush.isEnabled(), true, 'review after background refresh must update the submitted model');
+  let pushSummary = '';
+  badgePage.once('dialog', async (dialog) => {
+    pushSummary = dialog.message();
+    await dialog.dismiss();
+  });
+  await badgePush.click();
+  assert.ok(pushSummary.includes('3 lines · S$41.34'), 'submission confirmation must use the edited amount after background refresh');
+  let releasePush;
+  let pushStarted;
+  const pendingPush = new Promise((resolve) => { releasePush = resolve; });
+  const startedPush = new Promise((resolve) => { pushStarted = resolve; });
+  const submittedBills = [];
+  await badgePage.route('**/xero/invoices/push', async (route) => {
+    submittedBills.push(route.request().postDataJSON());
+    pushStarted();
+    await pendingPush;
+    await route.fulfill(submittedBills.length === 1
+      ? { status: 500, json: { error: 'Test push failed' } }
+      : { json: { invoiceID: 'retry-bill', invoiceNumber: 'RETRY', attachments: [], allAttached: true } });
+  });
+  badgePage.once('dialog', (dialog) => dialog.accept('Pending bill'));
+  await badgePush.click();
+  await startedPush;
+  await badgePage.evaluate(async () => {
+    const { loadReceipts } = await import('/claims.js?v=20261025-shared-edits');
+    await loadReceipts();
+  });
+  assert.equal(await badgePush.isDisabled(), true, 'background refresh must preserve the in-flight push lock');
+  await readyRow.locator('[data-field="amount"]').click();
+  await readyRow.locator('[data-field="amount"] input').fill('14');
+  await badgePage.keyboard.press('Enter');
+  assert.equal(await badgePush.isDisabled(), true, 'editing must not re-enable a pending push');
+  assert.equal(submittedBills.length, 1);
+  assert.equal(submittedBills[0].lineItems.reduce((sum, line) => sum + line.amount, 0), 41.34);
+  releasePush();
+  await badgePage.waitForFunction(() => document.querySelector('#status')?.textContent?.includes('Test push failed'));
+  assert.equal(await badgePush.isEnabled(), true, 'failed push must release the current button for retry');
+  badgePage.once('dialog', (dialog) => dialog.accept('Retry bill'));
+  await badgePush.click();
+  await badgePage.waitForFunction(() => document.querySelector('#status')?.textContent?.includes('Created draft bill RETRY'));
+  await badgePage.waitForFunction(() => !document.querySelector('.invoice-section[data-bucket="nongst"] .invoice-push-btn')?.disabled);
+  assert.equal(submittedBills.length, 2, 'retry should send one new request after the failure');
+  assert.equal(submittedBills[1].lineItems.reduce((sum, line) => sum + line.amount, 0), 42.34);
+
+  await readyRow.locator('.inv-preview-btn').click();
+  await badgePage.waitForSelector('#previewOverlay.active');
+  await badgePage.goBack();
+  assert.equal(await badgePage.locator('#claimsView').isVisible(), true);
+  assert.equal(await badgePage.locator('#previewOverlay').evaluate((el) => el.classList.contains('active')), false,
+    'leaving Invoices with browser Back must close its preview');
+  await badgePage.keyboard.press('Enter');
+  await badgePage.locator('#navInvoices').click();
+  await badgePage.waitForSelector('.invoice-section tr[data-id]');
+  await badgePage.locator('#claimsBackend').selectOption('ynab');
+  await badgePage.waitForFunction(() => document.querySelectorAll('.invoice-section tr[data-id]').length === 2);
+  assert.equal(await badgePage.locator('#invoicesNavBadge').textContent(), '2',
+    'badge should follow the selected backend just like submitted lines');
+  badgeState.receipts = [];
+  await badgePage.locator('#invoicesRefreshBtn').click();
+  await badgePage.waitForSelector('#invoicesEmpty:not([hidden])');
+  assert.equal(await badgePage.locator('#invoicesNavBadge').isVisible(), false,
+    'badge should hide when there are no bill lines to submit');
+  await badgePage.close();
+
   await browser.close();
   server.close();
   console.log('frontend smoke passed');

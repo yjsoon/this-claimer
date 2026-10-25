@@ -15,12 +15,13 @@ import {
   getReceiptDisplayName,
   getComparableReceiptAmounts,
 } from './lib/match.js';
-import { openPreview } from './lib/preview.js?v=20260914-preview-review';
-import { clearSelection, getClaimsBackend, loadReceipts, loadYnabTodos } from './claims.js?v=20261025-shared-edits';
+import { openPreview, closePreview } from './lib/preview.js?v=20260914-preview-review';
+import { clearSelection, getClaimsBackend, loadReceipts, loadYnabTodos, setOnReadyClaimsChange } from './claims.js?v=20261025-shared-edits';
 
 const claimsView = document.getElementById('claimsView');
 const navClaims = document.getElementById('navClaims');
 const navInvoices = document.getElementById('navInvoices');
+const invoicesNavBadge = document.getElementById('invoicesNavBadge');
 const invoicesView = document.getElementById('invoicesView');
 const xeroStatusEls = document.querySelectorAll('[data-xero-status]');
 const invoicesRefreshBtn = document.getElementById('invoicesRefreshBtn');
@@ -56,6 +57,7 @@ let invoicePartyDisplay = 'source';
 let invoicesActive = false;
 let invoicesLoading = false;
 let invoiceLoadingRequests = 0;
+let invoicePushInFlight = false;
 let xeroConnected = false;
 let xeroAccounts = null;
 let xeroTaxTypes = null;
@@ -557,6 +559,7 @@ function applySavedInvoiceEdits(lines) {
 function buildInvoiceLines() {
   if (claimsLoadErrorMessage || claimsDataBackend !== getClaimsBackend()) {
     invoiceLines = [];
+    updateInvoicesNavBadge();
     return;
   }
 
@@ -626,10 +629,12 @@ function buildInvoiceLines() {
   lines.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
   applySavedInvoiceEdits(lines);
   invoiceLines = lines;
+  updateInvoicesNavBadge();
 }
 
 export function renderInvoiceClaimLoadError() {
   invoiceLines = [];
+  updateInvoicesNavBadge();
   if (invoicesSectionsEl) invoicesSectionsEl.innerHTML = '';
   if (invoicesEmpty) invoicesEmpty.textContent = INVOICE_CLAIMS_UNAVAILABLE_TEXT;
   if (invoiceLoadingRequests === 0) setInvoicesLoading(false);
@@ -853,7 +858,7 @@ function renderInvoiceSection(bucket, lines, accounts) {
     ? `<button type="button" class="btn-secondary invoice-clear-stamps-btn" data-bucket="${bucket}">Clear stale draft stamps</button>`
     : '';
   const pushActions = pushable.length > 0
-    ? `<button type="button" class="btn-primary invoice-push-btn" data-bucket="${bucket}" ${allReviewed ? '' : 'disabled'}>Push to Xero (draft)</button>
+    ? `<button type="button" class="btn-primary invoice-push-btn" data-bucket="${bucket}" ${allReviewed && !invoicePushInFlight ? '' : 'disabled'}>${invoicePushInFlight ? 'Pushing…' : 'Push to Xero (draft)'}</button>
           <button type="button" class="btn-secondary invoice-download-btn" data-bucket="${bucket}">Download receipts PDF</button>
           <button type="button" class="btn-secondary invoice-claim-checked-btn" data-bucket="${bucket}" ${checkedCount ? '' : 'disabled'}>Mark checked as claimed</button>
           <span class="${noteClass}">${escapeHtml(invoicePushNote(bucket))}</span>`
@@ -1316,6 +1321,7 @@ async function clearLeftoverDraftStamps(bucket, btn) {
 }
 
 function updateSectionHeaders() {
+  updateInvoicesNavBadge();
   if (!invoicesSectionsEl) return;
   INVOICE_BUCKETS.forEach((bucket) => {
     const section = invoicesSectionsEl.querySelector(`.invoice-section[data-bucket="${bucket}"]`);
@@ -1326,7 +1332,10 @@ function updateSectionHeaders() {
     const meta = section.querySelector('.invoice-section-meta');
     if (meta) meta.textContent = invoiceSectionMeta(bucket, lines, total);
     const pushBtn = section.querySelector('.invoice-push-btn');
-    if (pushBtn) pushBtn.disabled = pushable.length === 0 || !allReviewed;
+    if (pushBtn) {
+      pushBtn.disabled = invoicePushInFlight || pushable.length === 0 || !allReviewed;
+      pushBtn.textContent = invoicePushInFlight ? 'Pushing…' : 'Push to Xero (draft)';
+    }
     const claimBtn = section.querySelector('.invoice-claim-checked-btn');
     if (claimBtn) claimBtn.disabled = pushable.filter(isLineReviewed).length === 0;
     const note = section.querySelector('.invoice-doc-note');
@@ -1511,6 +1520,13 @@ function bucketLines(bucket) {
 
 function pushableBucketLines(bucket) {
   return sortBucketLines(bucketLines(bucket), bucket).filter((l) => (Number(l.amount) || 0) > 0);
+}
+
+function updateInvoicesNavBadge() {
+  if (!invoicesNavBadge) return;
+  const count = INVOICE_BUCKETS.reduce((sum, bucket) => sum + pushableBucketLines(bucket).length, 0);
+  invoicesNavBadge.textContent = String(count);
+  invoicesNavBadge.hidden = count === 0;
 }
 
 // YNAB transfer transactions carry a payee like "Transfer : Work Refundables",
@@ -2184,6 +2200,7 @@ function invoicePushSummary(bucket, lines) {
 }
 
 async function pushInvoice(bucket, btn) {
+  if (invoicePushInFlight) return;
   if (claimsLoadErrorMessage) {
     showStatus('error', INVOICE_CLAIMS_UNAVAILABLE_TEXT);
     return;
@@ -2219,8 +2236,8 @@ async function pushInvoice(bucket, btn) {
   );
   if (reference === null) return;
 
-  btn.disabled = true;
-  btn.textContent = 'Pushing…';
+  invoicePushInFlight = true;
+  updateSectionHeaders();
   showStatus('uploading', `Creating ${BUCKET_LABEL[bucket]} draft and attaching ${lines.length} receipt(s)...`);
   try {
     lines.forEach(normaliseLineForSection);
@@ -2276,8 +2293,8 @@ async function pushInvoice(bucket, btn) {
   } catch (err) {
     showStatus('error', `Push failed: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
-    btn.disabled = false;
-    btn.textContent = 'Push to Xero (draft)';
+    invoicePushInFlight = false;
+    updateSectionHeaders();
   }
 }
 
@@ -2379,6 +2396,7 @@ export function showInvoicesView(show, { refresh = true } = {}) {
   if (show) {
     clearSelection();
   }
+  if (invoicesActive && !show) closePreview();
   invoicesActive = show;
   document.body.classList.toggle('invoices-active', show);
   if (claimsView) claimsView.hidden = show;
@@ -2401,9 +2419,27 @@ export function showInvoicesView(show, { refresh = true } = {}) {
 }
 
 export function initInvoices() {
+  setOnReadyClaimsChange(async () => {
+    closeActiveInvoiceEdit({ commit: claimsDataBackend === getClaimsBackend() });
+    // Initial load and explicit Refresh reconcile the shared snapshot themselves.
+    // Background rebuilds must not race those reads or an in-flight review save.
+    if (invoicesLoading || invoiceLoadingRequests) return;
+    await invoiceSyncPromise;
+    if (invoicesLoading || invoiceLoadingRequests) return;
+    // Preview actions capture a line too; discard them before replacing the model.
+    if (invoicesActive) closePreview();
+    receiptsData.forEach(receipt => {
+      if (!sharedInvoiceEdits.has(receipt.key)) {
+        sharedInvoiceEdits.set(receipt.key, receipt.invoiceEdits || { revision: null, lines: {} });
+      }
+    });
+    buildInvoiceLines();
+    if (invoicesActive) renderInvoiceEditor();
+  });
   window.addEventListener('claims-backend-change', (event) => {
     closeActiveInvoiceEdit({ commit: false });
     invoiceLines = [];
+    updateInvoicesNavBadge();
     if (event.detail?.loaded) buildInvoiceLines();
     if (invoicesActive) renderInvoiceEditor();
   });

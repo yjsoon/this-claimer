@@ -81,7 +81,7 @@ export async function openPreview(key, displayName, { amount = '', reviewed = fa
   }
 }
 
-function closePreview() {
+export function closePreview() {
   const request = ++previewRequest;
   previewOverlay.classList.remove('active');
   previewOverlay.classList.remove('has-review-action');
