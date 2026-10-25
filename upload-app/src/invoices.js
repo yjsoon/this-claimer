@@ -52,6 +52,7 @@ const INVOICE_SORT_OPTIONS = [
 const EYE_ICON = '<svg class="inv-eye-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
 
 let invoiceLines = [];
+let invoicePartyDisplay = 'source';
 let invoicesActive = false;
 let invoicesLoading = false;
 let invoiceLoadingRequests = 0;
@@ -505,6 +506,7 @@ function buildInvoiceLines() {
         include: Number.isFinite(amount) && amount > 0,
         date,
         payee,
+        sourceAccount: claim ? (claim.accountName || 'Unknown account') : 'Receipt only',
         description,
         currency,
         amount: Number.isFinite(amount) ? Number(amount) : 0,
@@ -703,6 +705,8 @@ function renderInvoiceLineRow(line, accounts) {
   const section = getLineSection(line);
   const reviewed = isLineReviewed(line);
   const invalidated = line.reviewInvalidated === true;
+  const partyLabel = invoicePartyDisplay === 'source' ? 'Source' : 'Destination';
+  const party = invoicePartyDisplay === 'source' ? line.sourceAccount : line.payee;
   return `
     <tr data-id="${escapeHtml(line.id)}" class="${reviewed ? 'inv-row-reviewed' : ''}${invalidated ? ' inv-row-stale' : ''}">
       <td class="col-actions" data-label="Actions">
@@ -720,7 +724,7 @@ function renderInvoiceLineRow(line, accounts) {
         </div>
       </td>
       <td class="inv-cell-editable inv-cell-date" data-label="Date" data-field="date" data-input="text" title="Tap to edit"><span class="inv-cell-text">${escapeHtml(line.date || '—')}</span></td>
-      <td class="inv-cell-payee" data-label="Payee"><span class="inv-description-payee">${escapeHtml(line.payee || 'Unknown payee')}</span></td>
+      <td class="inv-cell-payee" data-label="${partyLabel}"><span class="inv-description-payee">${escapeHtml(party)}</span></td>
       <td class="inv-cell-memo" data-label="Memo">${invoiceMemoRemarkHtml(line)}</td>
       <td class="inv-cell-editable inv-cell-account" data-label="Account" data-field="accountCode" data-input="select" title="Tap to edit"><span class="inv-cell-text">${escapeHtml(accountLabel(line.accountCode, accounts))}</span></td>
       <td class="inv-cell-editable inv-cell-type" data-label="Type" data-field="section" data-input="type" title="Tap to edit"><span class="inv-cell-text">${escapeHtml(BUCKET_LABEL[section])}</span></td>
@@ -769,6 +773,13 @@ function renderInvoiceSection(bucket, lines, accounts) {
         <p class="invoice-doc-sub">${invoiceSectionStatusHtml()}</p>
         <div class="invoice-section-tools">
           <label class="invoice-sort-label">
+            <span>Show</span>
+            <select class="invoice-party-select">
+              <option value="source" ${invoicePartyDisplay === 'source' ? 'selected' : ''}>Source</option>
+              <option value="destination" ${invoicePartyDisplay === 'destination' ? 'selected' : ''}>Destination</option>
+            </select>
+          </label>
+          <label class="invoice-sort-label">
             <span>Sort</span>
             <select class="invoice-sort-select" data-sort-bucket="${bucket}">
               ${renderInvoiceSortOptions(bucket)}
@@ -781,7 +792,7 @@ function renderInvoiceSection(bucket, lines, accounts) {
               <tr>
                 <th class="col-actions">Actions</th>
                 <th class="col-date">Date</th>
-                <th class="col-payee">Payee</th>
+                <th class="col-payee">${invoicePartyDisplay === 'source' ? 'Source' : 'Destination'}</th>
                 <th class="col-memo">Memo</th>
                 <th class="col-account">Account</th>
                 <th class="col-type">Type</th>
@@ -1242,6 +1253,12 @@ function bindInvoiceSectionEvents() {
     if (clearStampsBtn) {
       clearStampsBtn.addEventListener('click', () => clearLeftoverDraftStamps(bucket, clearStampsBtn));
     }
+    const partySelect = section.querySelector('.invoice-party-select');
+    partySelect.addEventListener('change', () => {
+      invoicePartyDisplay = partySelect.value;
+      renderInvoiceEditor();
+      invoicesSectionsEl.querySelector(`[data-bucket="${bucket}"] .invoice-party-select`).focus();
+    });
     const sortSelect = section.querySelector('.invoice-sort-select');
     if (sortSelect) {
       sortSelect.addEventListener('change', () => {
