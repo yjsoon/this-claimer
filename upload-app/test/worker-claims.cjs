@@ -86,10 +86,12 @@ async function main() {
       if (serverVersion === 'old') {
         return { id: transaction.id, memo: mismatch ? 'TODO: unchanged' : transaction.memo };
       }
-      const claimed = /^CLAIMED - (\d{4}-\d{2}-\d{2}): (.*)$/.exec(transaction.memo);
+      // A fields-only update leaves the stored memo as it was.
+      const claimed = transaction.memo === undefined ? null : /^CLAIMED - (\d{4}-\d{2}-\d{2}): (.*)$/.exec(transaction.memo);
+      const memo = claimed ? claimed[2] : 'Stored memo';
       return mismatch
-        ? { id: transaction.id, memo: claimed[2], claim_status: 'to_claim', claimed_on: null }
-        : { id: transaction.id, memo: claimed[2], claim_status: transaction.claim_status, claimed_on: transaction.claimed_on };
+        ? { id: transaction.id, memo, claim_status: 'to_claim', claimed_on: null }
+        : { id: transaction.id, memo, claim_status: transaction.claim_status, claimed_on: transaction.claimed_on };
     });
     response.writeHead(200, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify({ data: {
@@ -168,6 +170,12 @@ async function main() {
       { id: 'claim-4', status: 'claimed' },
       { id: 'claim-5', status: 'claimed' },
     ]);
+    // A claim HowMuch holds in its field is marked through the field alone.
+    requests.length = 0;
+    const flagged = await markClaimed(workerUrl, [{ ...lineItem('claim-8', 'Stored memo'), claimFlagged: true }]);
+    assert.equal(flagged.response.status, 200, JSON.stringify(flagged.body));
+    assert.deepEqual(requests[0].body, { transactions: [{ id: 'claim-8', claim_status: 'claimed', claimed_on: claimedDate }] });
+    assert.deepEqual(flagged.body.claimedYnab, [{ id: 'claim-8', status: 'claimed' }]);
     requests.length = 0;
     responseMode = 'field-mismatch';
     const fieldMismatch = await markClaimed(workerUrl, [lineItem('claim-6', 'Sixth claim'), lineItem('claim-7', 'Seventh claim')]);

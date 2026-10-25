@@ -171,6 +171,9 @@ interface YnabTodo {
   sourceUrl?: string;
   // True when HowMuch marks the amount "To confirm" (an estimate).
   needsConfirmation?: boolean;
+  // True when HowMuch holds the claim in its claim_status field rather than
+  // a TODO memo word; marking it claimed then leaves the memo alone.
+  claimFlagged?: boolean;
 }
 
 type ClaimsBackend = 'howmuch' | 'ynab';
@@ -232,6 +235,7 @@ interface PushLineItem {
   ynabClaimId?: string | null;
   claimSource?: 'transaction' | 'subtransaction' | null;
   claimDescription?: string | null;
+  claimFlagged?: boolean;
   claimsBackend?: ClaimsBackend;
   date: string;
   description: string;
@@ -425,25 +429,13 @@ function parseTodoDescription(memo: string | null | undefined): string | null {
   return description || 'Claim';
 }
 
-// HowMuch's own memo-word rule (its transaction-claim.ts): a leading word
-// counts when it is in capitals or followed by a colon in any case. Used only
-// for HowMuch rows stored before the claim field, so prose such as "Todo list
-// app" is not read as a claim where HowMuch does not show one either.
-const HOWMUCH_TODO_WORD = /^\s*(TODO)(?=[:\s]|$)(:?)\s*/i;
-
-function parseHowMuchLegacyTodo(memo: string | null | undefined): string | null {
-  const match = HOWMUCH_TODO_WORD.exec(memo || '');
-  if (!match || (match[1] !== 'TODO' && match[2] !== ':')) return null;
-  return (memo || '').slice(match[0].length).trim() || 'Claim';
-}
-
 // The claim description for a transaction, or null when it is not a claim.
-// HowMuch's claim_status wins; rows without it (YNAB, older HowMuch, HowMuch
-// rows stored before the field) keep the TODO memo convention.
+// HowMuch's claim_status wins, and the whole memo is the description. Rows
+// without it (YNAB, older HowMuch, HowMuch rows still carrying their TODO
+// word) keep the TODO memo convention.
 function transactionClaimDescription(transaction: YnabTransaction): string | null {
   if (transaction.claim_status === 'to_claim') return (transaction.memo || '').trim() || 'Claim';
   if (transaction.claim_status === 'claimed') return null;
-  if (transaction.claim_status === null) return parseHowMuchLegacyTodo(transaction.memo);
   return parseTodoDescription(transaction.memo);
 }
 
@@ -466,6 +458,7 @@ function toYnabTodoFromTransaction(transaction: YnabTransaction): YnabTodo | nul
     categoryName: transaction.category_name || undefined,
     source: 'transaction',
     ...(transaction.needs_confirmation === true ? { needsConfirmation: true } : {}),
+    ...(transaction.claim_status === 'to_claim' ? { claimFlagged: true } : {}),
   };
 }
 
@@ -1622,6 +1615,7 @@ function parsePushLineItems(raw: unknown): PushLineItem[] {
       claimSource:
         line.claimSource === 'transaction' || line.claimSource === 'subtransaction' ? line.claimSource : null,
       claimDescription: typeof line.claimDescription === 'string' ? line.claimDescription.trim() : null,
+      claimFlagged: line.claimFlagged === true,
       claimsBackend:
         line.claimsBackend === undefined ? undefined : parseExplicitClaimsBackend(line.claimsBackend),
       date: typeof line.date === 'string' ? line.date : '',
@@ -1932,17 +1926,19 @@ async function markHowMuchClaimed(
 
   for (let offset = 0; offset < pending.length; offset += HOWMUCH_UPDATE_BATCH_SIZE) {
     const batch = pending.slice(offset, offset + HOWMUCH_UPDATE_BATCH_SIZE);
-    // HowMuch with the claim field stores claim_status and claimed_on and keeps
-    // the memo as the description; older HowMuch ignores those two fields and
-    // stores the CLAIMED memo, as before.
-    // "Claim" stands in for an empty memo; keep the memo empty rather than
-    // writing the placeholder back as its text.
-    const updates = batch.map((claim) => ({
-      id: claim.ynabClaimId,
-      memo: claim.claimDescription === 'Claim' ? `CLAIMED - ${claimedDate}:` : `CLAIMED - ${claimedDate}: ${claim.claimDescription}`,
-      claim_status: 'claimed' as const,
-      claimed_on: claimedDate,
-    }));
+    // A claim HowMuch holds in its field is marked through the field alone,
+    // so the memo stays as the user wrote it. A claim still carried by a TODO
+    // word also gets the CLAIMED memo: HowMuch with the field turns that word
+    // into claim_status and keeps the rest as the memo, and an older HowMuch
+    // ignores the two fields and stores the memo, as before.
+    const updates = batch.map((claim) => claim.claimFlagged
+      ? { id: claim.ynabClaimId, claim_status: 'claimed' as const, claimed_on: claimedDate }
+      : {
+        id: claim.ynabClaimId,
+        memo: `CLAIMED - ${claimedDate}: ${claim.claimDescription}`,
+        claim_status: 'claimed' as const,
+        claimed_on: claimedDate,
+      });
 
     try {
       const response = await fetch(`${config.apiUrl}/plans/${encodeURIComponent(config.planId)}/transactions`, {
@@ -1964,7 +1960,7 @@ async function markHowMuchClaimed(
         const update = updates[index];
         results.set(
           claim.ynabClaimId,
-          howMuchConfirmsClaimed(returned.get(claim.ynabClaimId), update.memo, claimedDate)
+          howMuchConfirmsClaimed(returned.get(claim.ynabClaimId), 'memo' in update ? update.memo : undefined, claimedDate)
             ? { status: 'claimed' }
             : { status: 'failed', detail: 'HowMuch did not confirm the claim.' }
         );
@@ -1989,14 +1985,14 @@ async function markHowMuchClaimed(
 // otherwise by the CLAIMED memo an older server stores.
 function howMuchConfirmsClaimed(
   transaction: Pick<YnabTransaction, 'memo' | 'claim_status' | 'claimed_on'> | undefined,
-  memo: string,
+  memo: string | undefined,
   claimedDate: string
 ): boolean {
   if (!transaction) return false;
   if (transaction.claim_status !== undefined) {
     return transaction.claim_status === 'claimed' && transaction.claimed_on === claimedDate;
   }
-  return transaction.memo === memo;
+  return memo !== undefined && transaction.memo === memo;
 }
 
 // Flip a transaction memo from "TODO: ..." to "CLAIMED - YYYY-MM-DD: ...". On
