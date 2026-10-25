@@ -444,8 +444,9 @@ function parseTodoDescription(memo: string | null | undefined): string | null {
   if (!memo) return null;
   const { rest } = leadingToCheck(memo);
   const text = rest.trimStart();
-  const todoPattern = /^TODO(?:[:\s]|$)/i;
-  if (!todoPattern.test(text)) return null;
+  // A bare word counts only in capitals, as in HowMuch, so a memo of just
+  // "todo" stays text.
+  if (!/^TODO[:\s]/i.test(text) && text !== 'TODO') return null;
   const description = text.replace(/^TODO(?:[:\s]\s*|$)/i, '').trim();
   return description || 'Claim';
 }

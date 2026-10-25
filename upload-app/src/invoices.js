@@ -604,7 +604,7 @@ function bucketReviewState(bucket) {
 function invoicePushNote(bucket) {
   const { pushable, reviewedCount, allReviewed } = bucketReviewState(bucket);
   if (pushable.length === 0) return '';
-  if (allReviewed) return 'HowMuch/YNAB stay TODO until you mark checked lines claimed.';
+  if (allReviewed) return 'Claims stay outstanding in HowMuch/YNAB until you mark checked lines claimed.';
   return `Review every line before pushing (${reviewedCount}/${pushable.length} reviewed).`;
 }
 
@@ -2084,7 +2084,7 @@ function invoicePushSummary(bucket, lines) {
   return [
     `${lineLabel} · S$${total.toFixed(2)} → Soon Yin Jie (${BUCKET_LABEL[bucket]})`,
     `Attempts Xero attachment and prepares a downloadable ${receiptLabel} PDF in this list order; line descriptions include receipt page references.`,
-    'TODO memos change in the selected backend only when you click Mark checked as claimed.',
+    'Claims are marked claimed in the selected backend only when you click Mark checked as claimed.',
   ].join('\n');
 }
 
