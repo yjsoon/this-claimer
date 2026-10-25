@@ -6,6 +6,7 @@ import * as gmail from './gmail';
 import * as ai from './ai';
 import { verifyAccess, safeEqual } from './access';
 import { PDFDocument } from 'pdf-lib';
+import { INVOICE_EDITS_PREFIX, listInvoiceEditKeys, readInvoiceEdits, invoiceEditsResponse, type InvoiceEdits } from './invoice-edits';
 
 const assetManifest = JSON.parse(manifestJSON);
 
@@ -271,6 +272,7 @@ interface ReceiptSummary {
   taggedGstAmount?: number;
   taggedGstConfidence?: number;
   taggedGstSource?: string;
+  invoiceEdits?: InvoiceEdits;
   // Set once the linked YNAB claim has been marked claimed for this bill.
   xeroInvoiceId?: string;
   invoicedAt?: string;
@@ -605,20 +607,22 @@ async function fetchYnabTodos(
 
 async function listReceiptSummaries(
   env: Env,
-  options: { limit?: number; cursor?: string } = {}
+  options: { limit?: number; cursor?: string } = {},
+  invoiceEditKeys?: ReadonlySet<string>
 ): Promise<ReceiptListResult> {
   const limit = Math.min(Math.max(options.limit || 100, 1), 1000);
   // Ask R2 to return custom metadata inline so a page load is one list call
   // rather than one head() per receipt. R2 may shorten a page to fit the
   // response size; the cursor loop in the client picks up the remainder.
   const listStarted = Date.now();
+  const editKeys = invoiceEditKeys ?? await listInvoiceEditKeys(env.RECEIPTS);
   const listed = await env.RECEIPTS.list({ limit, cursor: options.cursor, include: ['customMetadata'] });
   const listMs = Date.now() - listStarted;
   const metadataStarted = Date.now();
   let headFallbacks = 0;
 
   const receipts = await mapWithConcurrency(
-    listed.objects,
+    listed.objects.filter(obj => !obj.key.startsWith(INVOICE_EDITS_PREFIX)),
     RECEIPT_METADATA_CONCURRENCY,
     async (obj): Promise<ReceiptSummary> => {
       // Fall back to head() only if the runtime ignored `include`.
@@ -672,6 +676,8 @@ async function listReceiptSummaries(
         taggedGstAmount: parseMetadataNumber(metadata.taggedGstAmount),
         taggedGstConfidence: parseMetadataNumber(metadata.taggedGstConfidence),
         taggedGstSource: metadata.taggedGstSource,
+        invoiceEdits: editKeys.has(INVOICE_EDITS_PREFIX + obj.key)
+          ? await readInvoiceEdits(env.RECEIPTS, obj.key) : { revision: null, lines: {} },
         xeroInvoiceId: metadata.xeroInvoiceId,
         invoicedAt: metadata.invoicedAt,
         xeroPendingInvoiceId: metadata.xeroPendingInvoiceId,
@@ -698,6 +704,7 @@ async function listAllReceiptSummaries(env: Env, maxReceipts = 5000): Promise<{
   truncated: boolean;
 }> {
   const receipts: ReceiptSummary[] = [];
+  const invoiceEditKeys = await listInvoiceEditKeys(env.RECEIPTS);
   let cursor: string | undefined;
   let hasMore = false;
 
@@ -705,7 +712,7 @@ async function listAllReceiptSummaries(env: Env, maxReceipts = 5000): Promise<{
     const page = await listReceiptSummaries(env, {
       limit: Math.min(1000, maxReceipts - receipts.length),
       cursor,
-    });
+    }, invoiceEditKeys);
     receipts.push(...page.receipts);
     cursor = page.cursor || undefined;
     hasMore = page.hasMore;
@@ -1231,6 +1238,7 @@ async function tagPendingGst(env: Env, limit: number): Promise<{
   let remaining = 0;
 
   for (const object of listed.objects) {
+    if (object.key.startsWith(INVOICE_EDITS_PREFIX)) continue;
     const head = await env.RECEIPTS.head(object.key);
     const metadata = head?.customMetadata || {};
     if (metadata.xeroInvoiceId) continue;
@@ -1396,6 +1404,7 @@ async function tagPendingReceipts(env: Env, limit: number): Promise<{
   const candidateKeys: string[] = [];
 
   for (const object of listed.objects) {
+    if (object.key.startsWith(INVOICE_EDITS_PREFIX)) continue;
     const head = await env.RECEIPTS.head(object.key);
     const metadata = head?.customMetadata || {};
     const linkedClaimIds = parseLinkedClaimIds(metadata.linkedClaimIds, metadata.linkedClaimId);
@@ -2142,6 +2151,19 @@ export default {
 
     try {
       // API routes
+      // Sidecars are internal records, never receipt downloads or tag targets.
+      if (path.startsWith('/receipt/') && decodeURIComponent(path.slice('/receipt/'.length)).startsWith(INVOICE_EDITS_PREFIX)) {
+        return Response.json({ error: 'Receipt not found' }, { status: 404, headers: corsHeaders });
+      }
+      if (path.startsWith('/receipt/') && path.endsWith('/invoice-edits')
+        && ['GET', 'PATCH'].includes(request.method)) {
+        const key = decodeURIComponent(path.slice('/receipt/'.length, -'/invoice-edits'.length));
+        const response = await invoiceEditsResponse(request, env.RECEIPTS, key);
+        return new Response(response.body, {
+          status: response.status,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+        });
+      }
       // POST /upload - Upload a receipt
       if (path === '/upload' && request.method === 'POST') {
         const formData = await request.formData();

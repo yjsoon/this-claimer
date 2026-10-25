@@ -137,6 +137,11 @@ async function main() {
       if (url.pathname === '/list') {
         if (!isAuthed) return route.fulfill({ status: 401, json: { error: 'unauthorised' } });
         if (mockState.failReceiptList) return route.fulfill({ status: 500, json: { error: 'list unavailable' } });
+        if (mockState.receipts) {
+          const body = JSON.parse(JSON.stringify({ receipts: mockState.receipts, hasMore: false }));
+          if (mockState.holdList) await mockState.holdList();
+          return route.fulfill({ json: body });
+        }
         const cursor = url.searchParams.get('cursor');
         const body = cursor === 'page-2'
           ? { receipts: receiptsPageTwo, hasMore: false }
@@ -163,7 +168,24 @@ async function main() {
         const responseTodos = mockState.labelByBackend
           ? todos.map((todo) => ({ ...todo, description: `${backend}: ${todo.description}` }))
           : todos;
-        return route.fulfill({ json: { todos: responseTodos, backend } });
+        return route.fulfill({ json: { todos: mockState.todos || responseTodos, backend } });
+      }
+      if (url.pathname.endsWith('/invoice-edits') && route.request().method() === 'PATCH') {
+        const key = decodeURIComponent(url.pathname.slice('/receipt/'.length, -'/invoice-edits'.length));
+        const receipt = (mockState.receipts || [...receiptsPageOne, ...receiptsPageTwo]).find(item => item.key === key);
+        const body = route.request().postDataJSON();
+        if (mockState.holdInvoiceSave) await mockState.holdInvoiceSave(body);
+        const current = receipt.invoiceEdits || { revision: null, lines: {} };
+        if (mockState.failInvoiceSave || mockState.failInvoiceClaimId === body.claimId) return route.fulfill({ status: 503, json: { error: 'Save unavailable' } });
+        if (body.revision !== current.revision) return route.fulfill({ status: 409, json: { ...current, error: 'Invoice edits changed' } });
+        const id = `${body.backend}::${body.claimId}`;
+        receipt.invoiceEdits = { revision: String(Number(current.revision || 0) + 1), lines: {
+          ...current.lines, [id]: { ...current.lines[id], ...body.patch },
+        } };
+        if (Object.keys(body.patch).some(field => !field.startsWith('review')) && !Object.hasOwn(body.patch, 'reviewed')) {
+          Object.assign(receipt.invoiceEdits.lines[id], { reviewed: false, reviewedSnapshot: null, reviewedSourceSnapshot: null });
+        }
+        return route.fulfill({ json: receipt.invoiceEdits });
       }
       if (url.pathname.startsWith('/receipt/') && route.request().method() === 'GET') {
         return route.fulfill({ contentType: 'application/pdf', body: previewPdfBytes });
@@ -694,6 +716,8 @@ async function main() {
   await page.keyboard.press('Escape');
   await taxCell.locator('.inv-cell-text').waitFor();
 
+  // Simulate an existing, pre-server browser review for legacy migration.
+  delete invoiceReceipt.invoiceEdits;
   await page.evaluate(() => {
     const store = JSON.parse(localStorage.getItem('claim_manager_invoice_edits') || '{}');
     const entry = store['howmuch::receipt-2.pdf::claim-1'];
@@ -726,6 +750,7 @@ async function main() {
   await partySelect.selectOption('destination');
   assert.equal(await page.locator('.invoice-section[data-bucket="nongst"] .inv-review-btn').getAttribute('aria-pressed'), 'true', 'switching display mode must not invalidate review');
 
+  delete invoiceReceipt.invoiceEdits;
   await page.evaluate(() => {
     const store = JSON.parse(localStorage.getItem('claim_manager_invoice_edits') || '{}');
     const entry = store['howmuch::receipt-2.pdf::claim-1'];
@@ -890,6 +915,9 @@ async function main() {
   await shortPage.locator('#previewReviewBtn').click();
   await shortPage.waitForSelector('#previewOverlay:not(.active)');
 
+  // Earlier browser contexts now share review state; start this shortcut
+  // scenario explicitly unreviewed rather than relying on empty localStorage.
+  delete invoiceReceipt.invoiceEdits;
   const navigationPage = await browser.newPage();
   await navigationPage.addInitScript(() => {
     localStorage.setItem('claim_manager_auth', 'test');
@@ -944,13 +972,302 @@ async function main() {
   }
   if (!compactLayout.backendVisible) throw new Error('backend selector should be visible on compact Invoices view');
 
+  const foodKey = '2026-10-21_140217_0f8c6339_2026-09-29_foodpanda_219.30.pdf';
+  const foodLineId = `howmuch::${foodKey}::food-claim`;
+  const food = { key: foodKey, originalName: '2026-09-29_foodpanda_219.30.pdf',
+    uploaded: '2026-10-21T14:02:17Z', linkedClaimIds: ['food-claim'], linkedClaimsBackend: 'howmuch',
+    taggedAmount: 219.30, taggedCurrency: 'SGD', taggedGstShown: true, taggedGstAmount: 0.12, taggedGstSource: 'fixture-ai' };
+  const foodState = { receipts: [food], todos: [{ id: 'food-claim', date: '2026-09-29',
+    payee: 'Foodpanda', description: 'ABC meetup #10', amount: 219.30, accountName: 'Personal Visa' }] };
+  const foodPage = async (legacy) => {
+    const p = await browser.newPage({ viewport: { width: 1440, height: 1100 }, deviceScaleFactor: 2 });
+    await p.addInitScript(({ legacy, foodLineId }) => {
+      localStorage.setItem('claim_manager_auth', 'test');
+      localStorage.setItem('claim_manager_remember', 'true');
+      if (legacy) localStorage.setItem('claim_manager_invoice_edits', JSON.stringify({ [foodLineId]: legacy }));
+    }, { legacy, foodLineId });
+    await setupMockApi(p, foodState);
+    await p.goto(`http://127.0.0.1:${port}/invoices`, { waitUntil: 'networkidle' });
+    return p;
+  };
+  const mac = await foodPage({ section: 'nongst', gstShown: false, taxType: 'NRINPUT', remark: 'Platform-fee GST only' });
+  assert.equal(food.invoiceEdits.lines['howmuch::food-claim'].taxType, 'NRINPUT', 'legacy edits should migrate to the server');
+  const other = await foodPage({ section: 'gst', gstShown: true, taxType: 'INPUTY24' });
+  const foodRow = p => p.locator('.invoice-section[data-bucket="nongst"] tr[data-id]');
+  assert.match(await foodRow(other).locator('[data-field="taxType"]').innerText(), /^NRINPUT\b/);
+  assert.match(await foodRow(other).innerText(), /S\$219\.30/);
+  assert.equal(await other.evaluate(id => JSON.parse(localStorage.getItem('claim_manager_invoice_edits'))[id].taxType, foodLineId), 'INPUTY24', 'old local edits remain backed up, but do not beat shared overrides');
+  await foodRow(mac).locator('.inv-description-remark').dblclick();
+  await foodRow(mac).locator('input').fill('Shared platform-fee exception');
+  await Promise.all([
+    mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
+    foodRow(mac).locator('input').press('Enter'),
+  ]);
+  await other.reload({ waitUntil: 'networkidle' });
+  assert.match(await foodRow(other).innerText(), /Shared platform-fee exception/);
+  await Promise.all([
+    other.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
+    foodRow(other).locator('.inv-review-btn').click(),
+  ]);
+  await mac.reload({ waitUntil: 'networkidle' });
+  assert.equal(await foodRow(mac).locator('.inv-review-btn').getAttribute('aria-pressed'), 'true', 'review state syncs across browser contexts');
+
+  const beforeNoOps = food.invoiceEdits.revision;
+  for (const field of ['description', 'remark', 'date', 'amount']) {
+    const cell = foodRow(mac).locator(`[data-field="${field}"]`);
+    if (field === 'description' || field === 'remark') await cell.dblclick();
+    else await cell.click();
+    await cell.locator('input').press('Enter');
+  }
+  for (const field of ['accountCode', 'taxType']) {
+    await foodRow(mac).locator(`[data-field="${field}"]`).click();
+    await mac.keyboard.press('Tab');
+    await foodRow(mac).locator(`[data-field="${field}"] select`).waitFor({ state: 'detached' });
+  }
+  await mac.waitForLoadState('networkidle');
+  assert.equal(food.invoiceEdits.revision, beforeNoOps, 'unchanged field commits must not write or erase shared review');
+  assert.equal(food.invoiceEdits.lines['howmuch::food-claim'].reviewed, true);
+
+  const dateCell = foodRow(mac).locator('[data-field="date"]');
+  await dateCell.click();
+  await dateCell.locator('input').fill('');
+  await Promise.all([
+    mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
+    dateCell.locator('input').press('Enter'),
+  ]);
+  await other.reload({ waitUntil: 'networkidle' });
+  assert.equal(await foodRow(other).locator('[data-field="date"]').innerText(), '—', 'cleared dates must stay cleared in another browser');
+  await dateCell.click();
+  await dateCell.locator('input').fill('2026-09-29');
+  await Promise.all([
+    mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
+    dateCell.locator('input').press('Enter'),
+  ]);
+
+  let releaseList;
+  const listGate = new Promise(resolve => { releaseList = resolve; });
+  const listStarted = new Promise(resolve => {
+    foodState.holdList = async () => { resolve(); await listGate; };
+  });
+  await mac.locator('#invoicesRefreshBtn').click();
+  await listStarted;
+  // Programmatic callbacks can still finish during Refresh, even though the
+  // busy table now blocks both pointer and keyboard interaction.
+  await Promise.all([
+    mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
+    foodRow(mac).locator('.inv-review-btn').dispatchEvent('click'),
+  ]);
+  delete foodState.holdList;
+  releaseList();
+  await mac.waitForFunction(() => !document.querySelector('#invoicesSections').hasAttribute('aria-busy'));
+  assert.equal(await foodRow(mac).locator('.inv-review-btn').getAttribute('aria-pressed'), 'false', 'a delayed list must not replace a newer completed edit');
+  await Promise.all([
+    mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
+    foodRow(mac).locator('.inv-review-btn').click(),
+  ]);
+
+  if (process.env.SCREENSHOT_DIR) {
+    fs.mkdirSync(process.env.SCREENSHOT_DIR, { recursive: true });
+    await mac.screenshot({ path: path.join(process.env.SCREENSHOT_DIR, 'invoice-shared-nongst.png') });
+  }
+  // Simulate an agent editing after this browser's last read.
+  food.invoiceEdits = { revision: '100', lines: { 'howmuch::food-claim': {
+    section: 'nongst', gstShown: false, taxType: 'NRINPUT', remark: 'Newer agent decision',
+  } } };
+  await foodRow(other).locator('[data-field="section"]').click();
+  await foodRow(other).locator('select').selectOption('gst');
+  await other.waitForFunction(() => document.querySelector('#status').textContent.includes('Local backup kept'));
+  await foodRow(other).waitFor();
+  assert.match(await foodRow(other).innerText(), /Newer agent decision/);
+  assert.equal(food.invoiceEdits.revision, '100', 'stale write must not replace agent state');
+  assert.equal(await other.evaluate(id => JSON.parse(localStorage.getItem('claim_manager_invoice_edits'))[id].section, foodLineId), 'gst');
+  if (process.env.SCREENSHOT_DIR) await other.screenshot({ path: path.join(process.env.SCREENSHOT_DIR, 'invoice-shared-conflict.png') });
+  foodState.failReceiptList = true;
+  await other.locator('#invoicesRefreshBtn').click();
+  await other.waitForFunction(() => !document.querySelector('#invoicesSections').hasAttribute('aria-busy'));
+  assert.match(await foodRow(other).innerText(), /Newer agent decision/, 'failed refresh must retain the last known conflict state');
+  assert.equal(await foodRow(other).locator('.inv-review-btn').getAttribute('aria-pressed'), 'false');
+  await foodRow(other).locator('.inv-review-btn').click();
+  await other.locator('.invoice-section[data-bucket="nongst"] .invoice-push-btn').click();
+  await other.waitForFunction(() => document.querySelector('#status').textContent.includes('resolve them before pushing'));
+  delete foodState.failReceiptList;
+  await other.reload({ waitUntil: 'networkidle' });
+  foodState.failInvoiceSave = true;
+  await foodRow(other).locator('[data-field="section"]').click();
+  await foodRow(other).locator('select').selectOption('gst');
+  await other.waitForFunction(() => document.querySelector('#status').textContent.includes('Save unavailable'));
+  assert.equal(food.invoiceEdits.revision, '100');
+  await other.locator('.invoice-section[data-bucket="gst"] .inv-review-btn').click();
+  await other.locator('.invoice-section[data-bucket="gst"] .invoice-push-btn').click();
+  await other.waitForFunction(() => document.querySelector('#status').textContent.includes('resolve them before pushing'));
+  foodState.failInvoiceSave = false;
+  let releaseRecoveryList;
+  const recoveryListGate = new Promise(resolve => { releaseRecoveryList = resolve; });
+  const recoveryListStarted = new Promise(resolve => {
+    foodState.holdList = async () => { resolve(); await recoveryListGate; };
+  });
+  await other.locator('#invoicesRefreshBtn').click();
+  await recoveryListStarted;
+  const failedReviewButton = other.locator('.invoice-section[data-bucket="gst"] .inv-review-btn');
+  await failedReviewButton.focus();
+  assert.equal(await failedReviewButton.evaluate(button => document.activeElement === button), false,
+    'Refresh must block keyboard focus on failed lines, not accept edits that cannot be shared');
+  assert.equal(await other.locator('#invoicesSections').evaluate(el => el.inert), true);
+  delete foodState.holdList;
+  releaseRecoveryList();
+  await other.waitForFunction(() => !document.querySelector('#invoicesSections').hasAttribute('aria-busy'));
+  assert.equal(await other.locator('#invoicesSections').evaluate(el => el.inert), false);
+  await foodRow(other).locator('.inv-review-btn').focus();
+  await Promise.all([
+    other.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
+    other.keyboard.press('Enter'),
+  ]);
+  assert.equal(food.invoiceEdits.lines['howmuch::food-claim'].reviewed, true,
+    'keyboard edits after successful recovery must be shared');
+  await other.reload({ waitUntil: 'networkidle' });
+  await foodRow(other).waitFor();
+  // A reset tombstone must ignore old browser overrides, then a deliberate
+  // Type edit must persist the complete normalized tax/account decision.
+  foodState.failInvoiceSave = false;
+  food.invoiceEdits = { revision: '101', lines: { 'howmuch::food-claim': {} } };
+  await mac.reload({ waitUntil: 'networkidle' });
+  const gstRow = mac.locator('.invoice-section[data-bucket="gst"] tr[data-id]');
+  await gstRow.waitFor();
+  await gstRow.locator('[data-field="section"]').click();
+  await Promise.all([
+    mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
+    gstRow.locator('select').selectOption('nongst'),
+  ]);
+  assert.equal(food.invoiceEdits.lines['howmuch::food-claim'].section, 'nongst');
+  assert.equal(food.invoiceEdits.lines['howmuch::food-claim'].gstShown, false);
+  assert.equal(food.invoiceEdits.lines['howmuch::food-claim'].taxType, 'NRINPUT');
+  await other.reload({ waitUntil: 'networkidle' });
+  await foodRow(other).waitFor();
+  assert.equal(food.taggedGstShown, true);
+  assert.equal(food.taggedGstAmount, 0.12);
+  assert.equal(food.taggedGstSource, 'fixture-ai');
+  await Promise.all([
+    mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
+    foodRow(mac).locator('.inv-review-btn').click(),
+  ]);
+  foodState.todos[0].amount = 220.30;
+  await other.reload({ waitUntil: 'networkidle' });
+  assert.equal(food.invoiceEdits.lines['howmuch::food-claim'].reviewed, false, 'source changes must persist review invalidation');
+  foodState.todos[0].amount = 219.30;
+  await mac.reload({ waitUntil: 'networkidle' });
+  assert.equal(await foodRow(mac).locator('.inv-review-btn').getAttribute('aria-pressed'), 'false', 'an old review must not resurrect when source data reverts');
+
+  // Reverse completion order: refreshed source arrives before a review save.
+  let releaseEarlyList;
+  const earlyListGate = new Promise(resolve => { releaseEarlyList = resolve; });
+  const earlyListStarted = new Promise(resolve => {
+    foodState.holdList = async () => { resolve(); await earlyListGate; };
+  });
+  let releaseReview;
+  const reviewGate = new Promise(resolve => { releaseReview = resolve; });
+  const reviewStarted = new Promise(resolve => {
+    foodState.holdInvoiceSave = async body => {
+      if (body.patch.reviewed === true) { resolve(); await reviewGate; }
+    };
+  });
+  foodState.todos[0].amount = 220.30;
+  await mac.locator('#invoicesRefreshBtn').click();
+  await earlyListStarted;
+  await foodRow(mac).locator('.inv-review-btn').dispatchEvent('click');
+  await reviewStarted;
+  const earlyListReturned = mac.waitForResponse(r => new URL(r.url()).pathname === '/list');
+  delete foodState.holdList;
+  releaseEarlyList();
+  await earlyListReturned;
+  await mac.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  releaseReview();
+  await mac.waitForFunction(() => !document.querySelector('#invoicesSections').hasAttribute('aria-busy'));
+  await mac.waitForLoadState('networkidle');
+  assert.equal(food.invoiceEdits.lines['howmuch::food-claim'].reviewed, false, 'source invalidation must persist after a delayed review save');
+  delete foodState.holdInvoiceSave;
+  foodState.todos[0].amount = 219.30;
+  await mac.reload({ waitUntil: 'networkidle' });
+  assert.equal(await foodRow(mac).locator('.inv-review-btn').getAttribute('aria-pressed'), 'false', 'delayed review must not resurrect after source reversion');
+
+  food.linkedClaimIds.push('food-sibling');
+  foodState.todos.push({ ...foodState.todos[0], id: 'food-sibling', description: 'Second linked claim' });
+  await mac.reload({ waitUntil: 'networkidle' });
+  const siblingRow = mac.locator(`tr[data-id="howmuch::${foodKey}::food-sibling"]`);
+  const firstRow = mac.locator(`tr[data-id="${foodLineId}"]`);
+  let releaseSave;
+  const saveGate = new Promise(resolve => { releaseSave = resolve; });
+  const saveStarted = new Promise(resolve => {
+    foodState.holdInvoiceSave = async body => {
+      if (body.claimId === 'food-claim') { resolve(); await saveGate; }
+    };
+  });
+  foodState.failInvoiceClaimId = 'food-claim';
+  await firstRow.locator('.inv-description-remark').dblclick();
+  await firstRow.locator('input').fill('Failed first-line edit');
+  await firstRow.locator('input').press('Enter');
+  await saveStarted;
+  await siblingRow.locator('.inv-description-remark').dblclick();
+  await siblingRow.locator('input').fill('Keep sibling edit');
+  await siblingRow.locator('input').press('Enter');
+  const siblingSaved = mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.request().postDataJSON().claimId === 'food-sibling' && r.status() === 200, { timeout: 5000 });
+  releaseSave();
+  await siblingSaved;
+  assert.equal(food.invoiceEdits.lines['howmuch::food-sibling'].remark, 'Keep sibling edit', 'one failed line must not discard sibling writes');
+  delete foodState.failInvoiceClaimId;
+  delete foodState.holdInvoiceSave;
+  await mac.reload({ waitUntil: 'networkidle' });
+  let releaseConflict;
+  const conflictGate = new Promise(resolve => { releaseConflict = resolve; });
+  const conflictStarted = new Promise(resolve => {
+    foodState.holdInvoiceSave = async body => {
+      if (body.claimId === 'food-claim') { resolve(); await conflictGate; }
+    };
+  });
+  await firstRow.locator('.inv-description-remark').dblclick();
+  await firstRow.locator('input').fill('Stale first edit');
+  await firstRow.locator('input').press('Enter');
+  await conflictStarted;
+  await siblingRow.locator('.inv-description-remark').dblclick();
+  await siblingRow.locator('input').fill('Stale sibling edit');
+  await siblingRow.locator('input').press('Enter');
+  food.invoiceEdits = { revision: '200', lines: {
+    'howmuch::food-claim': { section: 'nongst', remark: 'Agent first decision' },
+    'howmuch::food-sibling': { section: 'nongst', remark: 'Agent sibling decision' },
+  } };
+  const siblingConflict = mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.request().postDataJSON().claimId === 'food-sibling' && r.status() === 409);
+  releaseConflict();
+  await siblingConflict;
+  await mac.waitForFunction(() => document.querySelector('#invoicesSections').textContent.includes('Agent sibling decision'));
+  assert.equal(food.invoiceEdits.revision, '200', 'queued siblings must not silently rebase onto a conflict revision');
+  delete foodState.holdInvoiceSave;
+  await mac.reload({ waitUntil: 'networkidle' });
+  // Another writer reviews the sibling against a different source snapshot.
+  // Learning that snapshot from a 409 must durably invalidate its review,
+  // without requiring another user edit to restart the save queue.
+  food.invoiceEdits = { revision: '201', lines: {
+    ...food.invoiceEdits.lines,
+    'howmuch::food-sibling': { ...food.invoiceEdits.lines['howmuch::food-sibling'],
+      reviewed: true, reviewedSnapshot: {}, reviewedSourceSnapshot: {},
+    },
+  } };
+  const siblingInvalidated = mac.waitForResponse(r => r.url().endsWith('/invoice-edits')
+    && r.request().postDataJSON().claimId === 'food-sibling' && r.status() === 200, { timeout: 5000 });
+  await firstRow.locator('.inv-description-remark').dblclick();
+  await firstRow.locator('input').fill('Conflicting edit triggers rebuild');
+  await firstRow.locator('input').press('Enter');
+  await siblingInvalidated;
+  assert.equal(food.invoiceEdits.lines['howmuch::food-sibling'].reviewed, false,
+    'review invalidation queued by a conflict rebuild must reach shared storage');
+  await mac.close();
+  await other.close();
+  console.log('Shared Foodpanda overrides passed (legacy migration, stale local backup, two browsers, review, agent conflict, failed save, unchanged AI GST)');
+
   const badgePage = await browser.newPage();
   await badgePage.addInitScript(() => {
     localStorage.setItem('claim_manager_auth', 'test');
     localStorage.setItem('claim_manager_remember', 'true');
   });
-  await setupMockApi(badgePage);
-  await badgePage.route('**/list*', (route) => route.fulfill({ json: {
+  const badgeState = {
     receipts: [
       { key: 'two-claims.pdf', linkedClaimIds: ['claim-1', 'claim-2'], linkedClaimsBackend: 'howmuch' },
       { key: 'ready.pdf', linkedClaimId: 'receipt-ready:ready.pdf', taggedAmount: 8, taggedCurrency: 'SGD' },
@@ -959,8 +1276,8 @@ async function main() {
       { key: 'other-backend.pdf', linkedClaimId: 'claim-1', linkedClaimsBackend: 'ynab' },
       { key: 'billed.pdf', linkedClaimId: 'claim-1', linkedClaimsBackend: 'howmuch', xeroInvoiceId: 'already-billed' },
     ],
-    hasMore: false,
-  } }));
+  };
+  await setupMockApi(badgePage, badgeState);
   await badgePage.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'networkidle' });
   assert.equal(await badgePage.locator('#invoicesNavBadge').textContent(), '3',
     'badge should count submittable bill lines, including multiple claims per receipt and ready-only items, not stale, other-backend, billed or amountless links');
@@ -972,7 +1289,7 @@ async function main() {
   await badgePage.locator('.invoice-section .inv-preview-btn').first().click();
   await badgePage.waitForSelector('#previewOverlay.active');
   await badgePage.evaluate(async () => {
-    const { loadReceipts } = await import('/claims.js?v=20261015-ai');
+    const { loadReceipts } = await import('/claims.js?v=20261025-shared-edits');
     await loadReceipts();
   });
   await badgePage.waitForSelector('#previewOverlay:not(.active)');
@@ -1006,11 +1323,35 @@ async function main() {
       ? { status: 500, json: { error: 'Test push failed' } }
       : { json: { invoiceID: 'retry-bill', invoiceNumber: 'RETRY', attachments: [], allAttached: true } });
   });
-  badgePage.once('dialog', (dialog) => dialog.accept('Pending bill'));
-  await badgePush.click();
+  let releaseReviewSave;
+  const pendingReviewSave = new Promise(resolve => { releaseReviewSave = resolve; });
+  let reviewSaveStarted;
+  const startedReviewSave = new Promise(resolve => { reviewSaveStarted = resolve; });
+  badgeState.holdInvoiceSave = async body => {
+    if (body.claimId === 'receipt-ready:ready.pdf') {
+      reviewSaveStarted();
+      await pendingReviewSave;
+    }
+  };
+  await readyRow.locator('.inv-review-btn').click();
+  await startedReviewSave;
+  await readyRow.locator('.inv-review-btn').click();
+  let pushConfirmations = 0;
+  const acceptPendingBill = dialog => {
+    pushConfirmations++;
+    return dialog.accept('Pending bill');
+  };
+  badgePage.on('dialog', acceptPendingBill);
+  await badgePush.dblclick();
+  releaseReviewSave();
   await startedPush;
+  await badgePage.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(pushConfirmations, 1, 'two Push clicks waiting on one save must show only one confirmation');
+  assert.equal(submittedBills.length, 1, 'two Push clicks waiting on one save must create only one draft');
+  badgePage.removeListener('dialog', acceptPendingBill);
+  delete badgeState.holdInvoiceSave;
   await badgePage.evaluate(async () => {
-    const { loadReceipts } = await import('/claims.js?v=20261015-ai');
+    const { loadReceipts } = await import('/claims.js?v=20261025-shared-edits');
     await loadReceipts();
   });
   assert.equal(await badgePush.isDisabled(), true, 'background refresh must preserve the in-flight push lock');
@@ -1043,7 +1384,7 @@ async function main() {
   await badgePage.waitForFunction(() => document.querySelectorAll('.invoice-section tr[data-id]').length === 2);
   assert.equal(await badgePage.locator('#invoicesNavBadge').textContent(), '2',
     'badge should follow the selected backend just like submitted lines');
-  await badgePage.route('**/list*', (route) => route.fulfill({ json: { receipts: [], hasMore: false } }));
+  badgeState.receipts = [];
   await badgePage.locator('#invoicesRefreshBtn').click();
   await badgePage.waitForSelector('#invoicesEmpty:not([hidden])');
   assert.equal(await badgePage.locator('#invoicesNavBadge').isVisible(), false,

@@ -125,6 +125,16 @@ HEIC/WEBP can't be embedded and are flagged for manual upload. Full setup and us
 `.claude/skills/claim-invoices/SKILL.md`. Do not deploy to the live worker without
 the user's go-ahead.
 
+Manual invoice overrides are shared through `GET|PATCH /receipt/:key/invoice-edits`
+and returned on `/list` as `invoiceEdits`. Use the exact revision from GET for
+PATCH; a 409 requires deliberate conflict resolution, not a blind retry. These
+overrides are separate from AI `taggedGst*` findings. For YJ's Foodpanda
+platform-fee-only GST exception, set the line to `section: "nongst"`,
+`gstShown: false`, `taxType: "NRINPUT"`; do not falsify the AI's printed GST
+finding. See [agent API usage](docs/api.md#shared-invoice-line-overrides-agents-and-browsers)
+and [legacy browser edit migration](docs/usage.md#xero-invoices). Never mutate live
+receipt overrides just to verify an implementation.
+
 ### Vision Tagging (Amounts + GST Detection)
 
 Receipt vision tagging (amount/date/vendor/purpose extraction and GST

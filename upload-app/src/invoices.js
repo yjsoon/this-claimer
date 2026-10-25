@@ -16,7 +16,7 @@ import {
   getComparableReceiptAmounts,
 } from './lib/match.js';
 import { openPreview, closePreview } from './lib/preview.js?v=20260914-preview-review';
-import { clearSelection, getClaimsBackend, loadReceipts, loadYnabTodos, setOnReadyClaimsChange } from './claims.js?v=20261015-ai';
+import { clearSelection, getClaimsBackend, loadReceipts, loadYnabTodos, setOnReadyClaimsChange } from './claims.js?v=20261025-shared-edits';
 
 const claimsView = document.getElementById('claimsView');
 const navClaims = document.getElementById('navClaims');
@@ -236,6 +236,9 @@ function updateInvoicesVisibility() {
   if (invoicesLoadingEl) invoicesLoadingEl.hidden = !showLoadingBox;
   if (invoicesSectionsEl) {
     invoicesSectionsEl.hidden = showLoadingBox;
+    // Match the busy pointer lock for keyboard users too. Recovery must finish
+    // before accepting edits on lines whose previous save failed.
+    invoicesSectionsEl.inert = invoicesLoading;
     if (invoicesLoading && hasRenderedSections) invoicesSectionsEl.setAttribute('aria-busy', 'true');
     else invoicesSectionsEl.removeAttribute('aria-busy');
   }
@@ -246,6 +249,74 @@ function updateInvoicesVisibility() {
 // receipts with a non-empty linkedClaimIds, joined to their YNAB claim.
 // --- Persisted manual edits (survive refresh / tab toggle / reload) ---------
 const INVOICE_EDITS_KEY = 'claim_manager_invoice_edits';
+const sharedInvoiceEdits = new Map();
+const pendingInvoiceEdits = new Map();
+const failedInvoiceEdits = new Map();
+let invoiceSyncPromise = null;
+let activeInvoiceWrite = null;
+
+function sharedLineKey(line) {
+  return `${line.claimsBackend}::${line.invoiceClaimId}`;
+}
+
+function queueInvoiceEdit(line, patch) {
+  const pending = pendingInvoiceEdits.get(line.id);
+  pendingInvoiceEdits.set(line.id, {
+    line,
+    patch: { ...pending?.patch, ...patch },
+    revision: pending ? pending.revision : sharedInvoiceEdits.get(line.receiptKey)?.revision ?? null,
+  });
+  if (!invoiceSyncPromise) {
+    // Coalesce synchronous section/tax/account/review updates into one write.
+    invoiceSyncPromise = Promise.resolve().then(syncInvoiceEdits).finally(() => { invoiceSyncPromise = null; });
+  }
+}
+
+async function syncInvoiceEdits() {
+  let conflict = false;
+  while (pendingInvoiceEdits.size || conflict) {
+    if (!pendingInvoiceEdits.size) {
+      // Rebuilding can queue review invalidations or legacy imports. Drain
+      // those too before the promise awaited by Refresh/Push settles.
+      conflict = false;
+      closeActiveInvoiceEdit({ commit: false });
+      buildInvoiceLines();
+      renderInvoiceEditor();
+      continue;
+    }
+    const [id, { line, patch, revision }] = pendingInvoiceEdits.entries().next().value;
+    pendingInvoiceEdits.delete(id);
+    if (failedInvoiceEdits.has(id)) continue;
+    activeInvoiceWrite = { id, patch };
+    try {
+      const response = await fetch(`${API_BASE}/receipt/${encodeURIComponent(line.receiptKey)}/invoice-edits`, {
+        method: 'PATCH',
+        keepalive: true,
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ backend: line.claimsBackend, claimId: line.invoiceClaimId, revision, patch }),
+      });
+      const data = await response.json();
+      if (response.ok || response.status === 409) {
+        const shared = { revision: data.revision, lines: data.lines };
+        sharedInvoiceEdits.set(line.receiptKey, shared);
+        const receipt = receiptsData.find(item => item.key === line.receiptKey);
+        if (receipt) receipt.invoiceEdits = shared;
+      }
+      if (response.status === 409) conflict = true;
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      // Only our own successful writes advance queued siblings. Never rebase
+      // them onto a version learned from a conflict with another writer.
+      pendingInvoiceEdits.forEach(pending => {
+        if (pending.line.receiptKey === line.receiptKey && pending.revision === revision) pending.revision = data.revision;
+      });
+    } catch (error) {
+      failedInvoiceEdits.set(id, line.receiptKey);
+      showStatus('error', `Invoice edits not shared: ${error.message}. Local backup kept. Refresh, then reapply your edit if needed.`);
+    } finally {
+      activeInvoiceWrite = null;
+    }
+  }
+}
 
 function loadInvoiceEdits() {
   try {
@@ -272,6 +343,7 @@ function saveInvoiceEdit(lineId, patch) {
     ...patch,
   };
   writeInvoiceEdits(store);
+  if (line) queueInvoiceEdit(line, patch);
 }
 
 function saveLastPushResult(data, warnings, payload) {
@@ -400,14 +472,17 @@ function snapshotsMatch(a, b) {
 // outside the current backend/load snapshot so asynchronous refreshes cannot
 // discard review state from another ledger.
 function applySavedInvoiceEdits(lines) {
-  const store = loadInvoiceEdits();
+  // Local entries remain a recovery backup, not a cache of shared state.
+  const local = loadInvoiceEdits();
+  const store = {};
   lines.forEach((line) => {
     const legacyId = legacyLineItemKey(line);
-    const legacySaved = line.claimsBackend === 'ynab' ? store[legacyId] : undefined;
-    if (!store[line.id] && legacySaved) {
-      store[line.id] = { ...legacySaved, claimsBackend: 'ynab' };
-      delete store[legacyId];
-    }
+    const legacySaved = line.claimsBackend === 'ynab' ? local[legacyId] : undefined;
+    const shared = sharedInvoiceEdits.get(line.receiptKey)?.lines[sharedLineKey(line)];
+    const pending = pendingInvoiceEdits.get(line.id)?.patch;
+    const active = activeInvoiceWrite?.id === line.id ? activeInvoiceWrite.patch : undefined;
+    const base = shared ?? local[line.id] ?? legacySaved;
+    store[line.id] = base || pending || active ? { ...base, ...active, ...pending } : undefined;
     const saved = store[line.id];
     const sourceSnapshot = lineSourceSnapshot(line);
     line.sourceSnapshot = sourceSnapshot;
@@ -464,7 +539,24 @@ function applySavedInvoiceEdits(lines) {
       line.reviewedSourceSnapshot = reviewedSourceSnapshot;
     }
   });
-  writeInvoiceEdits(store);
+  lines.forEach(line => {
+    const shared = sharedInvoiceEdits.get(line.receiptKey)?.lines[sharedLineKey(line)];
+    if (!store[line.id] || failedInvoiceEdits.has(line.id)
+      || pendingInvoiceEdits.has(line.id) || activeInvoiceWrite?.id === line.id) return;
+    const { claimsBackend: _backend, ...patch } = store[line.id];
+    if (shared === undefined) {
+      queueInvoiceEdit(line, patch);
+    } else {
+      // Persist invalidation/baselining too, so a review cannot resurrect when
+      // upstream data later reverts or another browser loads an older snapshot.
+      const reviewPatch = Object.fromEntries(
+        ['reviewed', 'reviewedSnapshot', 'reviewedSourceSnapshot', 'reviewInvalidated']
+          .filter(field => !snapshotsMatch(patch[field], shared[field]))
+          .map(field => [field, patch[field]]),
+      );
+      if (Object.keys(reviewPatch).length) queueInvoiceEdit(line, reviewPatch);
+    }
+  });
 }
 
 function buildInvoiceLines() {
@@ -508,6 +600,7 @@ function buildInvoiceLines() {
       lines.push({
         id: `${claimsBackend}::${receipt.key}::${claimId}`,
         receiptKey: receipt.key,
+        invoiceClaimId: claimId,
         receiptName: getReceiptDisplayName(receipt),
         ynabClaimId: isReadyOnly ? null : claimId,
         claimSource: claim?.source || null,
@@ -886,8 +979,10 @@ function attachTextEditCell(cell, line, field, {
       const parsed = parse ? parse(input.value) : input.value;
       const changed = parsed !== original;
       line[field] = parsed;
-      saveInvoiceEdit(line.id, { [field]: parsed });
-      if (changed) reaffirmLineReviewAfterEdit(line, cell);
+      if (changed) {
+        saveInvoiceEdit(line.id, { [field]: parsed });
+        reaffirmLineReviewAfterEdit(line, cell);
+      }
       activeInvoiceEditCell = null;
       renderDisplay();
       updateSectionHeaders();
@@ -952,7 +1047,7 @@ function attachAccountEditCell(cell, line, accounts) {
       const prevSection = getLineSection(line);
       const changed = nextCode !== originalCode;
       line.accountCode = nextCode;
-      saveInvoiceEdit(line.id, { accountCode: line.accountCode });
+      if (changed) saveInvoiceEdit(line.id, { accountCode: line.accountCode });
       activeInvoiceEditCell = null;
       if (TRANSPORT_CODES.includes(line.accountCode) && getLineSection(line) !== 'transport') {
         setLineSection(line, 'transport');
@@ -1019,7 +1114,7 @@ function attachTaxTypeEditCell(cell, line) {
       const changed = next !== current;
       line.taxType = next;
       line.gstShown = next === 'INPUTY24';
-      saveInvoiceEdit(line.id, { taxType: line.taxType, gstShown: line.gstShown });
+      if (changed) saveInvoiceEdit(line.id, { taxType: line.taxType, gstShown: line.gstShown });
       activeInvoiceEditCell = null;
       if (getLineSection(line) !== lineBucket(line)) {
         line.section = lineBucket(line);
@@ -1344,6 +1439,10 @@ function renderInvoiceEditorDeferred() {
 // Rebuild and render the editor from data that is already loaded (page init,
 // auth success), so the Invoices tab doesn't fetch everything a second time.
 export function renderInvoicesFromLoadedData() {
+  receiptsData.forEach(receipt => {
+    // Do not replace the revision of an in-flight write with an older list.
+    if (!invoiceSyncPromise) sharedInvoiceEdits.set(receipt.key, receipt.invoiceEdits || { revision: null, lines: {} });
+  });
   buildInvoiceLines();
   renderInvoiceEditor();
   setInvoicesLoading(false);
@@ -1358,7 +1457,28 @@ async function refreshInvoicesView({ showLoading = true, reloadClaims = true } =
     setInvoicesLoading(true);
   }
   try {
-    await Promise.all([loadReceipts(), reloadClaims ? loadYnabTodos() : Promise.resolve()]);
+    await invoiceSyncPromise;
+    const beforeReload = new Map(sharedInvoiceEdits);
+    const failuresBeforeReload = new Map(failedInvoiceEdits);
+    const [receiptsLoaded] = await Promise.all([loadReceipts(), reloadClaims ? loadYnabTodos() : Promise.resolve()]);
+    if (!receiptsLoaded) {
+      showStatus('error', 'Could not refresh invoice edits. Shared edits and save errors kept; try Refresh again.');
+      return;
+    }
+    // Keyboard edits can start during the reads. Settle them before rebuilding
+    // so changed source data can durably invalidate their acknowledged review.
+    await invoiceSyncPromise;
+    receiptsData.forEach(receipt => {
+      if (sharedInvoiceEdits.get(receipt.key) === beforeReload.get(receipt.key)) {
+        sharedInvoiceEdits.set(receipt.key, receipt.invoiceEdits || { revision: null, lines: {} });
+        failuresBeforeReload.forEach((key, id) => {
+          if (key === receipt.key) failedInvoiceEdits.delete(id);
+        });
+      } else {
+        // A write/conflict completed after this list began; its revision wins.
+        receipt.invoiceEdits = sharedInvoiceEdits.get(receipt.key);
+      }
+    });
     buildInvoiceLines();
     await renderInvoiceEditorDeferred();
   } finally {
@@ -2090,6 +2210,12 @@ async function pushInvoice(bucket, btn) {
   }
 
   commitActiveInvoiceEdit();
+  await invoiceSyncPromise;
+  if (invoicePushInFlight) return;
+  if (failedInvoiceEdits.size) {
+    showStatus('error', 'Invoice edits are not shared. Refresh and resolve them before pushing.');
+    return;
+  }
 
   const lines = pushableBucketLines(bucket);
   if (lines.length === 0) {
@@ -2297,10 +2423,20 @@ export function showInvoicesView(show, { refresh = true } = {}) {
 }
 
 export function initInvoices() {
-  setOnReadyClaimsChange(() => {
+  setOnReadyClaimsChange(async () => {
     closeActiveInvoiceEdit({ commit: claimsDataBackend === getClaimsBackend() });
+    // Initial load and explicit Refresh reconcile the shared snapshot themselves.
+    // Background rebuilds must not race those reads or an in-flight review save.
+    if (invoicesLoading || invoiceLoadingRequests) return;
+    await invoiceSyncPromise;
+    if (invoicesLoading || invoiceLoadingRequests) return;
     // Preview actions capture a line too; discard them before replacing the model.
     if (invoicesActive) closePreview();
+    receiptsData.forEach(receipt => {
+      if (!sharedInvoiceEdits.has(receipt.key)) {
+        sharedInvoiceEdits.set(receipt.key, receipt.invoiceEdits || { revision: null, lines: {} });
+      }
+    });
     buildInvoiceLines();
     if (invoicesActive) renderInvoiceEditor();
   });
