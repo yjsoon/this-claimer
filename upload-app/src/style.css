@@ -2154,7 +2154,7 @@ body.selecting .claims-view {
 .invoice-doc-table .col-date { width: 104px; }
 .invoice-doc-table .col-payee { width: 140px; }
 .invoice-doc-table .col-account { width: 210px; }
-.invoice-doc-table .col-type { width: 86px; }
+.invoice-doc-table .col-type { width: 116px; }
 .invoice-doc-table .col-tax { width: 150px; }
 .invoice-doc-table .col-amount { width: 100px; }
 
@@ -2328,7 +2328,7 @@ body.selecting .claims-view {
 }
 
 .inv-edit-select {
-  max-width: 220px;
+  max-width: min(100%, 220px);
 }
 
 .inv-edit-actions {

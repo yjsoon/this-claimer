@@ -855,6 +855,22 @@ async function main() {
   assert.ok(Math.abs(desktopViewLayout.height - desktopEditLayout.height) <= 1, 'Memo editing should not change row height');
   assert.deepEqual(desktopEditLayout.cells, desktopViewLayout.cells, 'Memo editing should not move or resize invoice columns');
   await desktopPage.keyboard.press('Escape');
+  for (const width of [1600, 1024, 390]) {
+    await desktopPage.setViewportSize({ width, height: 900 });
+    for (const field of ['section', 'taxType']) {
+      const cell = desktopRow.locator(`[data-field="${field}"]`);
+      await cell.click();
+      const bounds = await cell.evaluate((element) => {
+        const cellRect = element.getBoundingClientRect();
+        const selectRect = element.querySelector('select').getBoundingClientRect();
+        return { left: cellRect.left, right: cellRect.right, selectLeft: selectRect.left, selectRight: selectRect.right };
+      });
+      assert.ok(bounds.selectLeft >= bounds.left && bounds.selectRight <= bounds.right,
+        `${field} dropdown must stay inside its cell at ${width}px: ${JSON.stringify(bounds)}`);
+      await desktopPage.keyboard.press('Escape');
+    }
+  }
+  await desktopPage.setViewportSize({ width: 1600, height: 900 });
   await desktopPage.locator('#navClaims').click();
   const claimsContainerWidth = await desktopPage.locator('.container').evaluate((element) => element.getBoundingClientRect().width);
   assert.equal(claimsContainerWidth, 1240, 'Claims should share the same desktop width as Invoices so the layout does not jump between tabs');
