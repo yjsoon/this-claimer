@@ -3181,7 +3181,6 @@ body.selecting .claims-view {
     padding-top: 6px;
   }
 
-  .invoice-doc-table tbody td.inv-cell-payee::before,
   .invoice-doc-table tbody td.inv-cell-memo::before,
   .invoice-doc-table tbody td.inv-cell-amount::before,
   .invoice-doc-table tbody td.col-actions::before,

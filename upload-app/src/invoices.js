@@ -378,6 +378,7 @@ function lineSourceSnapshot(line) {
     amount: Number(line.amount || 0).toFixed(2),
     date: line.date || '',
     description: line.description || '',
+    sourceAccount: line.sourceAccount,
   };
 }
 
@@ -385,7 +386,8 @@ function sourceSnapshotsMatch(current, saved) {
   if (!saved) return false;
   return current.amount === saved.amount
     && current.date === saved.date
-    && current.description === saved.description;
+    && current.description === saved.description
+    && current.sourceAccount === saved.sourceAccount;
 }
 
 function snapshotsMatch(a, b) {

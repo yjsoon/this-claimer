@@ -508,6 +508,7 @@ async function main() {
   const partySelect = page.locator('.invoice-section[data-bucket="nongst"]').getByRole('combobox', { name: 'Show' });
   assert.equal(await partyCell.textContent(), 'Personal Visa', 'show the source account by default');
   assert.equal(await partyCell.getAttribute('data-label'), 'Source');
+  assert.notEqual(await partyCell.evaluate(cell => getComputedStyle(cell, '::before').display), 'none', 'mobile cards must identify the displayed party even when the selector is offscreen');
   await partySelect.selectOption('destination');
   assert.equal(
     await partyCell.textContent(),
@@ -702,6 +703,16 @@ async function main() {
   }
   const disabledAfterReload = await page.locator('.invoice-section[data-bucket="nongst"] .invoice-push-btn').isDisabled();
   if (disabledAfterReload) throw new Error('push should remain enabled after legacy derived snapshot differences');
+
+  todos[0].accountName = 'Personal Mastercard';
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForSelector('.invoice-section[data-bucket="nongst"] tr[data-id]');
+  assert.equal(await partyCell.textContent(), 'Personal Mastercard');
+  assert.equal(await page.locator('.invoice-section[data-bucket="nongst"] .inv-review-btn').getAttribute('aria-pressed'), 'false', 'changing only the source account must invalidate review');
+  assert.equal(await page.locator('.invoice-section[data-bucket="nongst"] .invoice-push-btn').isDisabled(), true);
+  await page.locator('.invoice-section[data-bucket="nongst"] .inv-review-btn').click();
+  await partySelect.selectOption('destination');
+  assert.equal(await page.locator('.invoice-section[data-bucket="nongst"] .inv-review-btn').getAttribute('aria-pressed'), 'true', 'switching display mode must not invalidate review');
 
   const sortSelect = page.locator('.invoice-section[data-bucket="nongst"] .invoice-sort-select');
   await sortSelect.selectOption('date-desc');
