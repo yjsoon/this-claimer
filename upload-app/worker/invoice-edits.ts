@@ -31,7 +31,7 @@ function validPatch(patch: unknown): patch is Record<string, unknown> {
       case 'taxType': return typeof value === 'string' && ['INPUTY24', 'NRINPUT', 'OPINPUT'].includes(value);
       case 'gstShown': case 'include': case 'reviewed': case 'reviewInvalidated': return typeof value === 'boolean';
       case 'amount': return typeof value === 'number' && Number.isFinite(value) && value >= 0;
-      case 'date': return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
+      case 'date': return typeof value === 'string' && (value === '' || /^\d{4}-\d{2}-\d{2}$/.test(value));
       case 'accountCode': return typeof value === 'string' && /^\d{1,10}$/.test(value);
       case 'description': case 'remark': return typeof value === 'string' && value.length <= 10000;
       case 'reviewedSnapshot': case 'reviewedSourceSnapshot':

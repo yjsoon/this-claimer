@@ -274,7 +274,16 @@ function queueInvoiceEdit(line, patch) {
 
 async function syncInvoiceEdits() {
   let conflict = false;
-  while (pendingInvoiceEdits.size) {
+  while (pendingInvoiceEdits.size || conflict) {
+    if (!pendingInvoiceEdits.size) {
+      // Rebuilding can queue review invalidations or legacy imports. Drain
+      // those too before the promise awaited by Refresh/Push settles.
+      conflict = false;
+      closeActiveInvoiceEdit({ commit: false });
+      buildInvoiceLines();
+      renderInvoiceEditor();
+      continue;
+    }
     const [id, { line, patch, revision }] = pendingInvoiceEdits.entries().next().value;
     pendingInvoiceEdits.delete(id);
     if (failedInvoiceEdits.has(id)) continue;
@@ -306,12 +315,6 @@ async function syncInvoiceEdits() {
     } finally {
       activeInvoiceWrite = null;
     }
-  }
-  if (conflict) {
-    // Show the newer shared values; never silently rebase an old local edit.
-    closeActiveInvoiceEdit({ commit: false });
-    buildInvoiceLines();
-    renderInvoiceEditor();
   }
 }
 

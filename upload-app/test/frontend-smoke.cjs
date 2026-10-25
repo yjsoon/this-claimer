@@ -1028,6 +1028,22 @@ async function main() {
   assert.equal(food.invoiceEdits.revision, beforeNoOps, 'unchanged field commits must not write or erase shared review');
   assert.equal(food.invoiceEdits.lines['howmuch::food-claim'].reviewed, true);
 
+  const dateCell = foodRow(mac).locator('[data-field="date"]');
+  await dateCell.click();
+  await dateCell.locator('input').fill('');
+  await Promise.all([
+    mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
+    dateCell.locator('input').press('Enter'),
+  ]);
+  await other.reload({ waitUntil: 'networkidle' });
+  assert.equal(await foodRow(other).locator('[data-field="date"]').innerText(), '—', 'cleared dates must stay cleared in another browser');
+  await dateCell.click();
+  await dateCell.locator('input').fill('2026-09-29');
+  await Promise.all([
+    mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
+    dateCell.locator('input').press('Enter'),
+  ]);
+
   let releaseList;
   const listGate = new Promise(resolve => { releaseList = resolve; });
   const listStarted = new Promise(resolve => {
@@ -1223,6 +1239,25 @@ async function main() {
   await siblingConflict;
   await mac.waitForFunction(() => document.querySelector('#invoicesSections').textContent.includes('Agent sibling decision'));
   assert.equal(food.invoiceEdits.revision, '200', 'queued siblings must not silently rebase onto a conflict revision');
+  delete foodState.holdInvoiceSave;
+  await mac.reload({ waitUntil: 'networkidle' });
+  // Another writer reviews the sibling against a different source snapshot.
+  // Learning that snapshot from a 409 must durably invalidate its review,
+  // without requiring another user edit to restart the save queue.
+  food.invoiceEdits = { revision: '201', lines: {
+    ...food.invoiceEdits.lines,
+    'howmuch::food-sibling': { ...food.invoiceEdits.lines['howmuch::food-sibling'],
+      reviewed: true, reviewedSnapshot: {}, reviewedSourceSnapshot: {},
+    },
+  } };
+  const siblingInvalidated = mac.waitForResponse(r => r.url().endsWith('/invoice-edits')
+    && r.request().postDataJSON().claimId === 'food-sibling' && r.status() === 200, { timeout: 5000 });
+  await firstRow.locator('.inv-description-remark').dblclick();
+  await firstRow.locator('input').fill('Conflicting edit triggers rebuild');
+  await firstRow.locator('input').press('Enter');
+  await siblingInvalidated;
+  assert.equal(food.invoiceEdits.lines['howmuch::food-sibling'].reviewed, false,
+    'review invalidation queued by a conflict rebuild must reach shared storage');
   await mac.close();
   await other.close();
   console.log('Shared Foodpanda overrides passed (legacy migration, stale local backup, two browsers, review, agent conflict, failed save, unchanged AI GST)');

@@ -64,7 +64,7 @@ All reads/writes require the usual `X-Auth-Token` and, when configured, Access h
 
 Allowed patch fields: `section` (`gst|nongst|transport`), `gstShown` (manual invoice
 decision, not the AI finding), `taxType` (`INPUTY24|NRINPUT|OPINPUT`), `accountCode`
-(numeric string), `date` (`YYYY-MM-DD`), `description`, `amount` (nonnegative SGD
+(numeric string), `date` (`YYYY-MM-DD`, or `""` to leave the line date blank), `description`, `amount` (nonnegative SGD
 number), `remark`, `include`, `reviewed`, `reviewInvalidated`, `reviewedSnapshot`,
 and `reviewedSourceSnapshot`. Patches merge only supplied fields. Send classification
 fields together consistently; the UI normalizes section/account/tax as before.

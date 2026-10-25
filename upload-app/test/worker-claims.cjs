@@ -140,7 +140,7 @@ async function main() {
     assert.deepEqual(initial, { revision: null, lines: {} });
     const patch = (body) => fetch(editUrl, { method: 'PATCH', headers, body: JSON.stringify(body) });
     const edit = { backend: 'howmuch', claimId: 'foodpanda-claim', revision: null,
-      patch: { section: 'nongst', gstShown: false, taxType: 'NRINPUT', description: 'ABC meetup #10', amount: 219.30 } };
+      patch: { section: 'nongst', gstShown: false, taxType: 'NRINPUT', description: 'ABC meetup #10', amount: 219.30, date: '' } };
     const firstWriters = await Promise.all([patch(edit), patch(edit)]);
     assert.deepEqual(firstWriters.map(r => r.status).sort(), [200, 409], 'initial creation must also be atomic');
     const created = firstWriters.find(r => r.status === 200);
@@ -160,6 +160,7 @@ async function main() {
     assert.equal(latest.lines['howmuch::foodpanda-claim'].taxType, 'NRINPUT');
     assert.equal((await patch({ ...edit, revision: latest.revision, patch: { taggedGstShown: false } })).status, 400);
     assert.equal((await patch({ ...edit, revision: latest.revision, patch: { section: 'invalid' } })).status, 400);
+    assert.equal((await patch({ ...edit, revision: latest.revision, patch: { date: 'tomorrow' } })).status, 400);
     const otherBackend = await patch({ ...edit, revision: latest.revision, backend: 'ynab', patch: { section: 'gst' } });
     assert.equal(otherBackend.status, 200);
     const reset = await patch({ ...edit, revision: (await otherBackend.json()).revision, patch: null });
