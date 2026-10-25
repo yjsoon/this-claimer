@@ -174,6 +174,9 @@ interface YnabTodo {
   // True when HowMuch holds the claim in its claim_status field rather than
   // a TODO memo word; marking it claimed then leaves the memo alone.
   claimFlagged?: boolean;
+  // True when an older HowMuch row carries a TOCHECK word before its TODO;
+  // marking it claimed then keeps the estimate marker as needs_confirmation.
+  claimToCheckWord?: boolean;
 }
 
 type ClaimsBackend = 'howmuch' | 'ynab';
@@ -236,6 +239,7 @@ interface PushLineItem {
   claimSource?: 'transaction' | 'subtransaction' | null;
   claimDescription?: string | null;
   claimFlagged?: boolean;
+  claimToCheckWord?: boolean;
   claimsBackend?: ClaimsBackend;
   date: string;
   description: string;
@@ -421,11 +425,28 @@ function getDefaultYnabSinceDate(): string {
   return sixMonthsAgo.toISOString().split('T')[0];
 }
 
+// HowMuch's word for an estimate still to check. Like HowMuch, it counts in
+// capitals or before a colon, and can lead a TODO memo ("TOCHECK TODO: Taxi").
+const TOCHECK_WORD = /^\s*(TOCHECK)\b(:?)\s*/i;
+
+function leadingToCheck(memo: string): { toCheck: boolean; rest: string } {
+  let rest = memo;
+  let toCheck = false;
+  for (let match = TOCHECK_WORD.exec(rest); match; match = TOCHECK_WORD.exec(rest)) {
+    if (match[1] !== 'TOCHECK' && match[2] !== ':') break;
+    toCheck = true;
+    rest = rest.slice(match[0].length);
+  }
+  return { toCheck, rest };
+}
+
 function parseTodoDescription(memo: string | null | undefined): string | null {
   if (!memo) return null;
-  const todoPattern = /^TODO[:\s]/i;
-  if (!todoPattern.test(memo)) return null;
-  const description = memo.replace(/^TODO[:\s]\s*/i, '').trim();
+  const { rest } = leadingToCheck(memo);
+  const text = rest.trimStart();
+  const todoPattern = /^TODO(?:[:\s]|$)/i;
+  if (!todoPattern.test(text)) return null;
+  const description = text.replace(/^TODO(?:[:\s]\s*|$)/i, '').trim();
   return description || 'Claim';
 }
 
@@ -439,12 +460,17 @@ function transactionClaimDescription(transaction: YnabTransaction): string | nul
   return parseTodoDescription(transaction.memo);
 }
 
-function toYnabTodoFromTransaction(transaction: YnabTransaction): YnabTodo | null {
+function toYnabTodoFromTransaction(transaction: YnabTransaction, rowIds: Set<string>): YnabTodo | null {
   const description = transactionClaimDescription(transaction);
   if (!description) return null;
 
-  // For transfers, only keep the outflow side to avoid duplicate TODOs.
-  if (transaction.transfer_transaction_id && transaction.amount >= 0) {
+  // For transfers, only keep the outflow side to avoid duplicate TODOs. A
+  // HowMuch transfer made from a split line is the exception: the outflow is
+  // the split line, which has no claim field, so the linked side owns it.
+  const partnerIsSplitLine = transaction.claim_status === 'to_claim'
+    && !!transaction.transfer_transaction_id
+    && !rowIds.has(transaction.transfer_transaction_id);
+  if (transaction.transfer_transaction_id && transaction.amount >= 0 && !partnerIsSplitLine) {
     return null;
   }
 
@@ -457,9 +483,16 @@ function toYnabTodoFromTransaction(transaction: YnabTransaction): YnabTodo | nul
     accountName: transaction.account_name || 'Unknown account',
     categoryName: transaction.category_name || undefined,
     source: 'transaction',
-    ...(transaction.needs_confirmation === true ? { needsConfirmation: true } : {}),
+    ...(transaction.needs_confirmation === true || legacyToCheck(transaction) ? { needsConfirmation: true } : {}),
     ...(transaction.claim_status === 'to_claim' ? { claimFlagged: true } : {}),
+    ...(legacyToCheck(transaction) ? { claimToCheckWord: true } : {}),
   };
+}
+
+// A HowMuch row still carrying its words ("TOCHECK TODO: Taxi") holds the
+// estimate marker in the memo, not in needs_confirmation.
+function legacyToCheck(transaction: YnabTransaction): boolean {
+  return transaction.claim_status == null && !!transaction.memo && leadingToCheck(transaction.memo).toCheck;
 }
 
 function toYnabTodoFromSubtransaction(parent: YnabTransaction, subtransaction: YnabSubtransaction): YnabTodo | null {
@@ -605,6 +638,7 @@ async function fetchYnabTodos(
   if (!settled) throw new Error('HowMuch transactions changed repeatedly while loading; please retry.');
 
   const todos: YnabTodo[] = [];
+  const rowIds = new Set(transactions.map((transaction) => transaction.id));
 
   transactions.forEach((transaction) => {
     const subtransactionTodos: YnabTodo[] = [];
@@ -613,7 +647,7 @@ async function fetchYnabTodos(
       if (subtransactionTodo) subtransactionTodos.push(subtransactionTodo);
     });
 
-    const todo = toYnabTodoFromTransaction(transaction);
+    const todo = toYnabTodoFromTransaction(transaction, rowIds);
     if (todo && subtransactionTodos.length === 0) {
       todos.push(todo);
     }
@@ -1616,6 +1650,7 @@ function parsePushLineItems(raw: unknown): PushLineItem[] {
         line.claimSource === 'transaction' || line.claimSource === 'subtransaction' ? line.claimSource : null,
       claimDescription: typeof line.claimDescription === 'string' ? line.claimDescription.trim() : null,
       claimFlagged: line.claimFlagged === true,
+      claimToCheckWord: line.claimToCheckWord === true,
       claimsBackend:
         line.claimsBackend === undefined ? undefined : parseExplicitClaimsBackend(line.claimsBackend),
       date: typeof line.date === 'string' ? line.date : '',
@@ -1935,9 +1970,13 @@ async function markHowMuchClaimed(
       ? { id: claim.ynabClaimId, claim_status: 'claimed' as const, claimed_on: claimedDate }
       : {
         id: claim.ynabClaimId,
-        memo: `CLAIMED - ${claimedDate}: ${claim.claimDescription}`,
+        // "Claim" stands in for an empty memo; keep the memo empty rather
+        // than writing the placeholder back as its text.
+        memo: claim.claimDescription === 'Claim' ? `CLAIMED - ${claimedDate}:` : `CLAIMED - ${claimedDate}: ${claim.claimDescription}`,
         claim_status: 'claimed' as const,
         claimed_on: claimedDate,
+        // A TOCHECK word leaves with the TODO, so keep the estimate marker.
+        ...(claim.claimToCheckWord ? { needs_confirmation: true } : {}),
       });
 
     try {
@@ -2018,9 +2057,10 @@ async function markYnabClaimed(
     const memo = getData.data?.transaction?.memo || '';
     const claimField = getData.data?.transaction?.claim_status;
     if (claimField === 'claimed') return { status: 'claimed' }; // already done
-    if (claimField === undefined && /^\s*CLAIMED\b/i.test(memo)) return { status: 'claimed' };
-    const newMemo = /^\s*TODO:?/i.test(memo)
-      ? memo.replace(/^\s*TODO:?\s*/i, `CLAIMED - ${claimedDate}: `)
+    if (claimField == null && /^\s*CLAIMED\b/i.test(memo)) return { status: 'claimed' };
+    // A TOCHECK word before the TODO stays, after the CLAIMED day.
+    const newMemo = /^\s*(?:TOCHECK\b:?\s*)*TODO:?/i.test(memo)
+      ? memo.replace(/^\s*((?:TOCHECK\b:?\s*)*)TODO:?\s*/i, `CLAIMED - ${claimedDate}: $1`)
       : `CLAIMED - ${claimedDate}: ${memo}`.trim();
     const putRes = await fetch(base, {
       method: 'PUT',

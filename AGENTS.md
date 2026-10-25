@@ -67,7 +67,7 @@ The claims skill auto-invokes when the user mentions claims, expenses, reimburse
 
 ## YNAB Memo Convention
 
-- `TODO: <description>` — pending claim (the memo must start with `TODO` and then `:` or a space; any case)
+- `TODO: <description>` — pending claim (the memo must start with `TODO` followed by `:`, a space or nothing; any case)
 - `CLAIMED - YYYY-MM-DD: <description>` — processed claim
 
 HowMuch can also store the claim as a field: `claim_status` is `to_claim`, then `claimed` with the day in `claimed_on`, and the whole memo is the description. This tool reads both. A row with `claim_status: "to_claim"` is listed with its memo as the description and marked claimed through the field alone (`claim_status: "claimed"`, `claimed_on`), leaving the memo as written. Older HowMuch rows still carry the `TODO:` word and are kept that way (there is no bulk conversion); they are listed by the memo convention above and marked with the `CLAIMED - day:` memo plus the two fields (HowMuch with the field turns that word into it; an older HowMuch ignores the fields and stores the memo). The result is checked by the field when present, otherwise by the memo. A HowMuch transfer holds one claim on both sides, and the tool lists only the outflow side. Every YNAB row follows the memo convention. Subtransaction claims stay memo-only. HowMuch transactions can also carry `needs_confirmation: true` ("To confirm"), meaning the amount is an estimate still to be checked against the statement. Claims carry it as `needsConfirmation`; the app marks those amounts with an amber ≈ and warns before pushing them to Xero.
@@ -109,8 +109,9 @@ The claim JSON requires these fields: `merchant`, `amount`, `date`, `memo`, `xer
 An alternative to Volopay: the receipts.soon.sg **Invoices** tab turns ready-to-claim
 items into monthly DRAFT bills in Xero (payee "Soon Yin Jie"), split into GST /
 non-GST / transport, with receipts attached. After a push, receipts are tagged
-`xeroInvoiceId` (so they drop off the tab) and the linked YNAB `TODO:` memos become
-`CLAIMED - YYYY-MM-DD:`.
+`xeroInvoiceId` (so they drop off the tab) and the linked claims are marked
+claimed (`TODO:` memos become `CLAIMED - YYYY-MM-DD:`; HowMuch rows held in
+`claim_status` get the field and keep their memo).
 
 - Worker: `upload-app/worker/xero.ts` (OAuth 2.0 over raw fetch, refresh-token
   rotation in the `XERO_TOKENS` KV namespace, bill creation + attachments) and the

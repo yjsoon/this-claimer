@@ -9,8 +9,10 @@ Turns the "ready to claim" items in the receipts.soon.sg upload-app into monthly
 **DRAFT bills in Xero**, replacing the Volopay flow. Bills are split into GST /
 non-GST / transport; line items are grouped by account and sorted by date; payee
 is **"Soon Yin Jie"**; receipts are attached. After a push, receipts are tagged
-`xeroInvoiceId` (so they drop off the tab) and the linked YNAB `TODO:` memos are
-flipped to `CLAIMED - YYYY-MM-DD:`.
+`xeroInvoiceId` (so they drop off the tab) and the linked claims are marked
+claimed: YNAB and older HowMuch `TODO:` memos are flipped to
+`CLAIMED - YYYY-MM-DD:`, and HowMuch rows held in `claim_status` get
+`claimed` plus the day, with their memo left as written.
 
 ## Where it lives
 
@@ -44,7 +46,7 @@ flipped to `CLAIMED - YYYY-MM-DD:`.
 Open receipts.soon.sg → **Invoices** (toolbar toggle). Review the editable table —
 tweak description, **Account**, the **GST?** toggle (sets the input tax code), and
 the per-line **remark**; the GST / non-GST / transport buckets update live. If a
-line is still on this tab, it is not claimed. HowMuch/YNAB stay `TODO:` until
+line is still on this tab, it is not claimed. HowMuch/YNAB claims stay outstanding until
 **Mark checked as claimed**. Do not treat `xeroPending*` metadata as a live Xero
 bill — use **Clear stale draft stamps** (or `PATCH /receipt/:key/xero-pending`
 with `{ "clear": true }`) to drop leftover stamps only; never delete the receipt
@@ -67,7 +69,7 @@ automatically; the **Detect GST** button backfills receipts without a verdict
 | GET | `/xero/status` | `{connected, tenantName}` |
 | POST | `/xero/disconnect` | Forget stored tokens |
 | GET | `/xero/meta` | Tax rates + expense accounts (dropdowns / verification) |
-| POST | `/xero/invoices/push` | Create DRAFT bill, attach receipts, tag + flip YNAB CLAIMED |
+| POST | `/xero/invoices/push` | Create DRAFT bill, attach receipts, tag + mark claims claimed |
 | PATCH | `/receipt/:key/xero-pending` | Clear leftover `xeroPending*` stamps only (`{ "clear": true }`); never deletes the file |
 | POST | `/gst-tags/pending?limit=8` | Detect GST for receipts without a verdict (backfill; returns `remaining`) |
 | POST | `/receipt/:key/tag-gst` | Force GST re-detection for one receipt |

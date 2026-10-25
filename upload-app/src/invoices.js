@@ -1894,6 +1894,8 @@ async function submitClaimed(invoiceID, lineItems) {
       : undefined,
     // HowMuch holds this claim in its field: mark it there, memo untouched.
     claimFlagged: item.ynabClaimId ? claimsById.get(item.ynabClaimId)?.claimFlagged === true : undefined,
+    // Its TOCHECK word leaves with the TODO; HowMuch keeps it as To confirm.
+    claimToCheckWord: item.ynabClaimId ? claimsById.get(item.ynabClaimId)?.claimToCheckWord === true : undefined,
   }));
   const res = await fetch(`${API_BASE}/xero/invoices/mark-claimed`, {
     method: 'POST',
