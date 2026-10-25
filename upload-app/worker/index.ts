@@ -6,7 +6,7 @@ import * as gmail from './gmail';
 import * as ai from './ai';
 import { verifyAccess, safeEqual } from './access';
 import { PDFDocument } from 'pdf-lib';
-import { INVOICE_EDITS_PREFIX, readInvoiceEdits, invoiceEditsResponse, type InvoiceEdits } from './invoice-edits';
+import { INVOICE_EDITS_PREFIX, listInvoiceEditKeys, readInvoiceEdits, invoiceEditsResponse, type InvoiceEdits } from './invoice-edits';
 
 const assetManifest = JSON.parse(manifestJSON);
 
@@ -607,13 +607,15 @@ async function fetchYnabTodos(
 
 async function listReceiptSummaries(
   env: Env,
-  options: { limit?: number; cursor?: string } = {}
+  options: { limit?: number; cursor?: string } = {},
+  invoiceEditKeys?: ReadonlySet<string>
 ): Promise<ReceiptListResult> {
   const limit = Math.min(Math.max(options.limit || 100, 1), 1000);
   // Ask R2 to return custom metadata inline so a page load is one list call
   // rather than one head() per receipt. R2 may shorten a page to fit the
   // response size; the cursor loop in the client picks up the remainder.
   const listStarted = Date.now();
+  const editKeys = invoiceEditKeys ?? await listInvoiceEditKeys(env.RECEIPTS);
   const listed = await env.RECEIPTS.list({ limit, cursor: options.cursor, include: ['customMetadata'] });
   const listMs = Date.now() - listStarted;
   const metadataStarted = Date.now();
@@ -674,7 +676,8 @@ async function listReceiptSummaries(
         taggedGstAmount: parseMetadataNumber(metadata.taggedGstAmount),
         taggedGstConfidence: parseMetadataNumber(metadata.taggedGstConfidence),
         taggedGstSource: metadata.taggedGstSource,
-        invoiceEdits: await readInvoiceEdits(env.RECEIPTS, obj.key),
+        invoiceEdits: editKeys.has(INVOICE_EDITS_PREFIX + obj.key)
+          ? await readInvoiceEdits(env.RECEIPTS, obj.key) : { revision: null, lines: {} },
         xeroInvoiceId: metadata.xeroInvoiceId,
         invoicedAt: metadata.invoicedAt,
         xeroPendingInvoiceId: metadata.xeroPendingInvoiceId,
@@ -701,6 +704,7 @@ async function listAllReceiptSummaries(env: Env, maxReceipts = 5000): Promise<{
   truncated: boolean;
 }> {
   const receipts: ReceiptSummary[] = [];
+  const invoiceEditKeys = await listInvoiceEditKeys(env.RECEIPTS);
   let cursor: string | undefined;
   let hasMore = false;
 
@@ -708,7 +712,7 @@ async function listAllReceiptSummaries(env: Env, maxReceipts = 5000): Promise<{
     const page = await listReceiptSummaries(env, {
       limit: Math.min(1000, maxReceipts - receipts.length),
       cursor,
-    });
+    }, invoiceEditKeys);
     receipts.push(...page.receipts);
     cursor = page.cursor || undefined;
     hasMore = page.hasMore;

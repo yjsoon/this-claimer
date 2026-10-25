@@ -130,6 +130,10 @@ async function main() {
     const uploaded = await fetch(`${workerUrl}/upload`, {
       method: 'POST', headers: { 'X-Auth-Token': 'test-auth' }, body: form,
     }).then(r => r.json());
+    form.set('file', new Blob(['%PDF-1.4\nunedited fixture'], { type: 'application/pdf' }), 'unedited.pdf');
+    const unedited = await fetch(`${workerUrl}/upload`, {
+      method: 'POST', headers: { 'X-Auth-Token': 'test-auth' }, body: form,
+    }).then(r => r.json());
     const editUrl = `${workerUrl}/receipt/${encodeURIComponent(uploaded.key)}/invoice-edits`;
     assert.equal((await fetch(editUrl)).status, 401);
     const initial = await fetch(editUrl, { headers }).then(r => r.json());
@@ -163,8 +167,9 @@ async function main() {
     assert.deepEqual(resetData.lines['howmuch::foodpanda-claim'], {}, 'reset retains a tombstone against legacy re-import');
     assert.equal(resetData.lines['ynab::foodpanda-claim'].section, 'gst');
     const listed = await fetch(`${workerUrl}/list`, { headers }).then(r => r.json());
-    assert.equal(listed.receipts.length, 1, 'override sidecars must not appear as receipts');
-    assert.deepEqual(listed.receipts[0].invoiceEdits, resetData);
+    assert.equal(listed.receipts.length, 2, 'override sidecars must not appear as receipts');
+    assert.deepEqual(listed.receipts.find(r => r.key === uploaded.key).invoiceEdits, resetData);
+    assert.deepEqual(listed.receipts.find(r => r.key === unedited.key).invoiceEdits, { revision: null, lines: {} });
     const bytes = await fetch(`${workerUrl}/receipt/${encodeURIComponent(uploaded.key)}`, { headers }).then(r => r.text());
     assert.equal(bytes, '%PDF-1.4\ninvoice fixture');
     console.log('Invoice override API passed (CAS, concurrent writers, backend isolation, reset, listing, receipt preservation)');

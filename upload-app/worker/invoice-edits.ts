@@ -7,6 +7,17 @@ export interface InvoiceEdits {
   lines: Record<string, Record<string, unknown>>;
 }
 
+export async function listInvoiceEditKeys(bucket: R2Bucket): Promise<Set<string>> {
+  const keys = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    const page = await bucket.list({ prefix: INVOICE_EDITS_PREFIX, cursor });
+    page.objects.forEach(object => keys.add(object.key));
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  return keys;
+}
+
 export async function readInvoiceEdits(bucket: R2Bucket, key: string): Promise<InvoiceEdits> {
   const object = await bucket.get(INVOICE_EDITS_PREFIX + key);
   return object ? object.json<InvoiceEdits>() : { revision: null, lines: {} };
