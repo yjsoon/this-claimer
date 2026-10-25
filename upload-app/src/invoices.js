@@ -2208,6 +2208,7 @@ async function pushInvoice(bucket, btn) {
 
   commitActiveInvoiceEdit();
   await invoiceSyncPromise;
+  if (invoicePushInFlight) return;
   if (failedInvoiceEdits.size) {
     showStatus('error', 'Invoice edits are not shared. Refresh and resolve them before pushing.');
     return;

@@ -1288,9 +1288,33 @@ async function main() {
       ? { status: 500, json: { error: 'Test push failed' } }
       : { json: { invoiceID: 'retry-bill', invoiceNumber: 'RETRY', attachments: [], allAttached: true } });
   });
-  badgePage.once('dialog', (dialog) => dialog.accept('Pending bill'));
-  await badgePush.click();
+  let releaseReviewSave;
+  const pendingReviewSave = new Promise(resolve => { releaseReviewSave = resolve; });
+  let reviewSaveStarted;
+  const startedReviewSave = new Promise(resolve => { reviewSaveStarted = resolve; });
+  badgeState.holdInvoiceSave = async body => {
+    if (body.claimId === 'receipt-ready:ready.pdf') {
+      reviewSaveStarted();
+      await pendingReviewSave;
+    }
+  };
+  await readyRow.locator('.inv-review-btn').click();
+  await startedReviewSave;
+  await readyRow.locator('.inv-review-btn').click();
+  let pushConfirmations = 0;
+  const acceptPendingBill = dialog => {
+    pushConfirmations++;
+    return dialog.accept('Pending bill');
+  };
+  badgePage.on('dialog', acceptPendingBill);
+  await badgePush.dblclick();
+  releaseReviewSave();
   await startedPush;
+  await badgePage.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(pushConfirmations, 1, 'two Push clicks waiting on one save must show only one confirmation');
+  assert.equal(submittedBills.length, 1, 'two Push clicks waiting on one save must create only one draft');
+  badgePage.removeListener('dialog', acceptPendingBill);
+  delete badgeState.holdInvoiceSave;
   await badgePage.evaluate(async () => {
     const { loadReceipts } = await import('/claims.js?v=20261025-shared-edits');
     await loadReceipts();
