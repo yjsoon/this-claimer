@@ -1117,6 +1117,39 @@ async function main() {
   await mac.reload({ waitUntil: 'networkidle' });
   assert.equal(await foodRow(mac).locator('.inv-review-btn').getAttribute('aria-pressed'), 'false', 'an old review must not resurrect when source data reverts');
 
+  // Reverse completion order: refreshed source arrives before a review save.
+  let releaseEarlyList;
+  const earlyListGate = new Promise(resolve => { releaseEarlyList = resolve; });
+  const earlyListStarted = new Promise(resolve => {
+    foodState.holdList = async () => { resolve(); await earlyListGate; };
+  });
+  let releaseReview;
+  const reviewGate = new Promise(resolve => { releaseReview = resolve; });
+  const reviewStarted = new Promise(resolve => {
+    foodState.holdInvoiceSave = async body => {
+      if (body.patch.reviewed === true) { resolve(); await reviewGate; }
+    };
+  });
+  foodState.todos[0].amount = 220.30;
+  await mac.locator('#invoicesRefreshBtn').click();
+  await earlyListStarted;
+  await foodRow(mac).locator('.inv-review-btn').focus();
+  await mac.keyboard.press('Enter');
+  await reviewStarted;
+  const earlyListReturned = mac.waitForResponse(r => new URL(r.url()).pathname === '/list');
+  delete foodState.holdList;
+  releaseEarlyList();
+  await earlyListReturned;
+  await mac.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  releaseReview();
+  await mac.waitForFunction(() => !document.querySelector('#invoicesSections').hasAttribute('aria-busy'));
+  await mac.waitForLoadState('networkidle');
+  assert.equal(food.invoiceEdits.lines['howmuch::food-claim'].reviewed, false, 'source invalidation must persist after a delayed review save');
+  delete foodState.holdInvoiceSave;
+  foodState.todos[0].amount = 219.30;
+  await mac.reload({ waitUntil: 'networkidle' });
+  assert.equal(await foodRow(mac).locator('.inv-review-btn').getAttribute('aria-pressed'), 'false', 'delayed review must not resurrect after source reversion');
+
   food.linkedClaimIds.push('food-sibling');
   foodState.todos.push({ ...foodState.todos[0], id: 'food-sibling', description: 'Second linked claim' });
   await mac.reload({ waitUntil: 'networkidle' });

@@ -1450,6 +1450,9 @@ async function refreshInvoicesView({ showLoading = true, reloadClaims = true } =
       showStatus('error', 'Could not refresh invoice edits. Shared edits and save errors kept; try Refresh again.');
       return;
     }
+    // Keyboard edits can start during the reads. Settle them before rebuilding
+    // so changed source data can durably invalidate their acknowledged review.
+    await invoiceSyncPromise;
     receiptsData.forEach(receipt => {
       if (sharedInvoiceEdits.get(receipt.key) === beforeReload.get(receipt.key)) {
         sharedInvoiceEdits.set(receipt.key, receipt.invoiceEdits || { revision: null, lines: {} });
