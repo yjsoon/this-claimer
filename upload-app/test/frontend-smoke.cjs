@@ -1035,11 +1035,11 @@ async function main() {
   });
   await mac.locator('#invoicesRefreshBtn').click();
   await listStarted;
-  // Busy styling blocks pointer events, but review buttons remain keyboard-focusable.
-  await foodRow(mac).locator('.inv-review-btn').focus();
+  // Programmatic callbacks can still finish during Refresh, even though the
+  // busy table now blocks both pointer and keyboard interaction.
   await Promise.all([
     mac.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
-    mac.keyboard.press('Enter'),
+    foodRow(mac).locator('.inv-review-btn').dispatchEvent('click'),
   ]);
   delete foodState.holdList;
   releaseList();
@@ -1084,6 +1084,30 @@ async function main() {
   await other.locator('.invoice-section[data-bucket="gst"] .inv-review-btn').click();
   await other.locator('.invoice-section[data-bucket="gst"] .invoice-push-btn').click();
   await other.waitForFunction(() => document.querySelector('#status').textContent.includes('resolve them before pushing'));
+  foodState.failInvoiceSave = false;
+  let releaseRecoveryList;
+  const recoveryListGate = new Promise(resolve => { releaseRecoveryList = resolve; });
+  const recoveryListStarted = new Promise(resolve => {
+    foodState.holdList = async () => { resolve(); await recoveryListGate; };
+  });
+  await other.locator('#invoicesRefreshBtn').click();
+  await recoveryListStarted;
+  const failedReviewButton = other.locator('.invoice-section[data-bucket="gst"] .inv-review-btn');
+  await failedReviewButton.focus();
+  assert.equal(await failedReviewButton.evaluate(button => document.activeElement === button), false,
+    'Refresh must block keyboard focus on failed lines, not accept edits that cannot be shared');
+  assert.equal(await other.locator('#invoicesSections').evaluate(el => el.inert), true);
+  delete foodState.holdList;
+  releaseRecoveryList();
+  await other.waitForFunction(() => !document.querySelector('#invoicesSections').hasAttribute('aria-busy'));
+  assert.equal(await other.locator('#invoicesSections').evaluate(el => el.inert), false);
+  await foodRow(other).locator('.inv-review-btn').focus();
+  await Promise.all([
+    other.waitForResponse(r => r.url().endsWith('/invoice-edits') && r.status() === 200),
+    other.keyboard.press('Enter'),
+  ]);
+  assert.equal(food.invoiceEdits.lines['howmuch::food-claim'].reviewed, true,
+    'keyboard edits after successful recovery must be shared');
   await other.reload({ waitUntil: 'networkidle' });
   await foodRow(other).waitFor();
   // A reset tombstone must ignore old browser overrides, then a deliberate
@@ -1133,8 +1157,7 @@ async function main() {
   foodState.todos[0].amount = 220.30;
   await mac.locator('#invoicesRefreshBtn').click();
   await earlyListStarted;
-  await foodRow(mac).locator('.inv-review-btn').focus();
-  await mac.keyboard.press('Enter');
+  await foodRow(mac).locator('.inv-review-btn').dispatchEvent('click');
   await reviewStarted;
   const earlyListReturned = mac.waitForResponse(r => new URL(r.url()).pathname === '/list');
   delete foodState.holdList;

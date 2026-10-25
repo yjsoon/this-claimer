@@ -234,6 +234,9 @@ function updateInvoicesVisibility() {
   if (invoicesLoadingEl) invoicesLoadingEl.hidden = !showLoadingBox;
   if (invoicesSectionsEl) {
     invoicesSectionsEl.hidden = showLoadingBox;
+    // Match the busy pointer lock for keyboard users too. Recovery must finish
+    // before accepting edits on lines whose previous save failed.
+    invoicesSectionsEl.inert = invoicesLoading;
     if (invoicesLoading && hasRenderedSections) invoicesSectionsEl.setAttribute('aria-busy', 'true');
     else invoicesSectionsEl.removeAttribute('aria-busy');
   }
