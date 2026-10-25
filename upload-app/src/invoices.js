@@ -15,12 +15,13 @@ import {
   getReceiptDisplayName,
   getComparableReceiptAmounts,
 } from './lib/match.js';
-import { openPreview } from './lib/preview.js?v=20260914-preview-review';
-import { clearSelection, getClaimsBackend, loadReceipts, loadYnabTodos } from './claims.js?v=20261015-ai';
+import { openPreview, closePreview } from './lib/preview.js?v=20260914-preview-review';
+import { clearSelection, getClaimsBackend, loadReceipts, loadYnabTodos, setOnReadyClaimsChange } from './claims.js?v=20261015-ai';
 
 const claimsView = document.getElementById('claimsView');
 const navClaims = document.getElementById('navClaims');
 const navInvoices = document.getElementById('navInvoices');
+const invoicesNavBadge = document.getElementById('invoicesNavBadge');
 const invoicesView = document.getElementById('invoicesView');
 const xeroStatusEls = document.querySelectorAll('[data-xero-status]');
 const invoicesRefreshBtn = document.getElementById('invoicesRefreshBtn');
@@ -468,6 +469,7 @@ function applySavedInvoiceEdits(lines) {
 function buildInvoiceLines() {
   if (claimsLoadErrorMessage || claimsDataBackend !== getClaimsBackend()) {
     invoiceLines = [];
+    updateInvoicesNavBadge();
     return;
   }
 
@@ -536,10 +538,12 @@ function buildInvoiceLines() {
   lines.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
   applySavedInvoiceEdits(lines);
   invoiceLines = lines;
+  updateInvoicesNavBadge();
 }
 
 export function renderInvoiceClaimLoadError() {
   invoiceLines = [];
+  updateInvoicesNavBadge();
   if (invoicesSectionsEl) invoicesSectionsEl.innerHTML = '';
   if (invoicesEmpty) invoicesEmpty.textContent = INVOICE_CLAIMS_UNAVAILABLE_TEXT;
   if (invoiceLoadingRequests === 0) setInvoicesLoading(false);
@@ -1224,6 +1228,7 @@ async function clearLeftoverDraftStamps(bucket, btn) {
 }
 
 function updateSectionHeaders() {
+  updateInvoicesNavBadge();
   if (!invoicesSectionsEl) return;
   INVOICE_BUCKETS.forEach((bucket) => {
     const section = invoicesSectionsEl.querySelector(`.invoice-section[data-bucket="${bucket}"]`);
@@ -1394,6 +1399,13 @@ function bucketLines(bucket) {
 
 function pushableBucketLines(bucket) {
   return sortBucketLines(bucketLines(bucket), bucket).filter((l) => (Number(l.amount) || 0) > 0);
+}
+
+function updateInvoicesNavBadge() {
+  if (!invoicesNavBadge) return;
+  const count = INVOICE_BUCKETS.reduce((sum, bucket) => sum + pushableBucketLines(bucket).length, 0);
+  invoicesNavBadge.textContent = String(count);
+  invoicesNavBadge.hidden = count === 0;
 }
 
 // YNAB transfer transactions carry a payee like "Transfer : Work Refundables",
@@ -2279,9 +2291,17 @@ export function showInvoicesView(show, { refresh = true } = {}) {
 }
 
 export function initInvoices() {
+  setOnReadyClaimsChange(() => {
+    closeActiveInvoiceEdit({ commit: claimsDataBackend === getClaimsBackend() });
+    // Preview actions capture a line too; discard them before replacing the model.
+    if (invoicesActive) closePreview();
+    buildInvoiceLines();
+    if (invoicesActive) renderInvoiceEditor();
+  });
   window.addEventListener('claims-backend-change', (event) => {
     closeActiveInvoiceEdit({ commit: false });
     invoiceLines = [];
+    updateInvoicesNavBadge();
     if (event.detail?.loaded) buildInvoiceLines();
     if (invoicesActive) renderInvoiceEditor();
   });

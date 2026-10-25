@@ -944,6 +944,66 @@ async function main() {
   }
   if (!compactLayout.backendVisible) throw new Error('backend selector should be visible on compact Invoices view');
 
+  const badgePage = await browser.newPage();
+  await badgePage.addInitScript(() => {
+    localStorage.setItem('claim_manager_auth', 'test');
+    localStorage.setItem('claim_manager_remember', 'true');
+  });
+  await setupMockApi(badgePage);
+  await badgePage.route('**/list*', (route) => route.fulfill({ json: {
+    receipts: [
+      { key: 'two-claims.pdf', linkedClaimIds: ['claim-1', 'claim-2'], linkedClaimsBackend: 'howmuch' },
+      { key: 'ready.pdf', linkedClaimId: 'receipt-ready:ready.pdf', taggedAmount: 8, taggedCurrency: 'SGD' },
+      { key: 'no-amount.pdf', linkedClaimId: 'receipt-ready:no-amount.pdf' },
+      { key: 'stale.pdf', linkedClaimId: 'no-longer-pending', linkedClaimsBackend: 'howmuch' },
+      { key: 'other-backend.pdf', linkedClaimId: 'claim-1', linkedClaimsBackend: 'ynab' },
+      { key: 'billed.pdf', linkedClaimId: 'claim-1', linkedClaimsBackend: 'howmuch', xeroInvoiceId: 'already-billed' },
+    ],
+    hasMore: false,
+  } }));
+  await badgePage.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'networkidle' });
+  assert.equal(await badgePage.locator('#invoicesNavBadge').textContent(), '3',
+    'badge should count submittable bill lines, including multiple claims per receipt and ready-only items, not stale, other-backend, billed or amountless links');
+  await badgePage.locator('#navInvoices').click();
+  await badgePage.waitForSelector('.invoice-section tr[data-id]');
+  assert.equal(await badgePage.locator('#invoicesNavBadge').textContent(), '3');
+  assert.equal(await badgePage.locator('.invoice-section tr[data-id]').count(), 3);
+  // A Gmail/amount-tagging refresh must not detach row editors from the submitted model.
+  await badgePage.locator('.invoice-section .inv-preview-btn').first().click();
+  await badgePage.waitForSelector('#previewOverlay.active');
+  await badgePage.evaluate(async () => {
+    const { loadReceipts } = await import('/claims.js?v=20261015-ai');
+    await loadReceipts();
+  });
+  await badgePage.waitForSelector('#previewOverlay:not(.active)');
+  const readyRow = badgePage.locator('tr[data-id="ynab::ready.pdf::receipt-ready:ready.pdf"]');
+  await readyRow.locator('[data-field="amount"]').click();
+  await readyRow.locator('[data-field="amount"] input').fill('13');
+  await badgePage.keyboard.press('Enter');
+  await readyRow.locator('.inv-preview-btn').click();
+  await badgePage.locator('#previewReviewBtn').click();
+  const unreviewedRows = badgePage.locator('.invoice-section .inv-review-btn[aria-pressed="false"]');
+  while (await unreviewedRows.count()) await unreviewedRows.first().click();
+  const badgePush = badgePage.locator('.invoice-section[data-bucket="nongst"] .invoice-push-btn');
+  assert.equal(await badgePush.isEnabled(), true, 'review after background refresh must update the submitted model');
+  let pushSummary = '';
+  badgePage.once('dialog', async (dialog) => {
+    pushSummary = dialog.message();
+    await dialog.dismiss();
+  });
+  await badgePush.click();
+  assert.ok(pushSummary.includes('3 lines · S$41.34'), 'submission confirmation must use the edited amount after background refresh');
+  await badgePage.locator('#claimsBackend').selectOption('ynab');
+  await badgePage.waitForFunction(() => document.querySelectorAll('.invoice-section tr[data-id]').length === 2);
+  assert.equal(await badgePage.locator('#invoicesNavBadge').textContent(), '2',
+    'badge should follow the selected backend just like submitted lines');
+  await badgePage.route('**/list*', (route) => route.fulfill({ json: { receipts: [], hasMore: false } }));
+  await badgePage.locator('#invoicesRefreshBtn').click();
+  await badgePage.waitForSelector('#invoicesEmpty:not([hidden])');
+  assert.equal(await badgePage.locator('#invoicesNavBadge').isVisible(), false,
+    'badge should hide when there are no bill lines to submit');
+  await badgePage.close();
+
   await browser.close();
   server.close();
   console.log('frontend smoke passed');
