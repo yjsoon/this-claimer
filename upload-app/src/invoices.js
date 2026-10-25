@@ -1134,7 +1134,13 @@ function attachInvoiceRowEditors(tr, line, accounts) {
     commitActiveInvoiceEdit();
     openPreview(line.receiptKey, line.receiptName, {
       amount: formatCurrencyAmount('SGD', Number(line.amount)),
-      onReview: () => setLineReviewed(line, true, reviewBtn),
+      reviewed: isLineReviewed(line),
+      onReview: (reviewed) => setLineReviewed(line, reviewed, reviewBtn),
+      onNavigate: (direction) => {
+        const buttons = [...invoicesSectionsEl.querySelectorAll('.inv-preview-btn')];
+        const index = buttons.indexOf(tr.querySelector('.inv-preview-btn'));
+        buttons[index + direction]?.click();
+      },
     });
   });
   const unlinkBtn = tr.querySelector('.inv-unlink-btn');

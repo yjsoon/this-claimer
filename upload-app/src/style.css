@@ -1908,6 +1908,12 @@ body.selecting .claims-view {
   font-weight: 700;
 }
 
+.preview-review-btn[aria-pressed="false"] {
+  background: transparent;
+  color: var(--success);
+  box-shadow: inset 0 0 0 2px var(--success);
+}
+
 .preview-overlay.has-review-action .preview-content,
 .preview-overlay.has-review-action .preview-image {
   min-height: 0;

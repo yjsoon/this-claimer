@@ -118,6 +118,9 @@ const server = http.createServer((req, res) => {
 async function main() {
   await new Promise((resolve) => server.listen(port, resolve));
   const browser = await chromium.launch({ headless: true });
+  const previewPdf = await require('pdf-lib').PDFDocument.create();
+  previewPdf.addPage().drawText('Test receipt');
+  const previewPdfBytes = Buffer.from(await previewPdf.save());
   let uploadCount = 0;
   const markClaimRequests = [];
   const linkRequests = [];
@@ -138,6 +141,11 @@ async function main() {
         const body = cursor === 'page-2'
           ? { receipts: receiptsPageTwo, hasMore: false }
           : { receipts: receiptsPageOne, hasMore: true, cursor: 'page-2' };
+        if (mockState.previewNavigation && !cursor) {
+          body.receipts = receiptsPageOne.map((receipt) => receipt.key === 'receipt-1.pdf'
+            ? { ...receipt, linkedClaimIds: ['claim-2'], linkedClaimsBackend: 'howmuch' }
+            : receipt);
+        }
         return route.fulfill({ json: body });
       }
 
@@ -156,6 +164,9 @@ async function main() {
           ? todos.map((todo) => ({ ...todo, description: `${backend}: ${todo.description}` }))
           : todos;
         return route.fulfill({ json: { todos: responseTodos, backend } });
+      }
+      if (url.pathname.startsWith('/receipt/') && route.request().method() === 'GET') {
+        return route.fulfill({ contentType: 'application/pdf', body: previewPdfBytes });
       }
       if (url.pathname.startsWith('/receipt/') && route.request().method() === 'DELETE' && !url.pathname.endsWith('/link')) {
         receiptDeletes.push(url.pathname);
@@ -862,6 +873,42 @@ async function main() {
   }
   await shortPage.locator('#previewReviewBtn').click();
   await shortPage.waitForSelector('#previewOverlay:not(.active)');
+
+  const navigationPage = await browser.newPage();
+  await navigationPage.addInitScript(() => {
+    localStorage.setItem('claim_manager_auth', 'test');
+    localStorage.setItem('claim_manager_remember', 'true');
+  });
+  await setupMockApi(navigationPage, { previewNavigation: true });
+  await navigationPage.goto(`http://127.0.0.1:${port}/invoices`, { waitUntil: 'networkidle' });
+  const previewRows = navigationPage.locator('.invoice-section tr[data-id]');
+  assert.equal(await previewRows.count(), 2);
+  await previewRows.first().locator('.inv-preview-btn').click();
+  await navigationPage.waitForFunction(() => document.querySelector('#previewPdf').src.startsWith('blob:'));
+  const firstFilename = await navigationPage.locator('#previewFilename').textContent();
+  await navigationPage.keyboard.press('ArrowLeft');
+  assert.equal(await navigationPage.locator('#previewFilename').textContent(), firstFilename, 'left at the first line should stop');
+  await navigationPage.keyboard.press('Enter');
+  assert.equal(await previewRows.first().locator('.inv-review-btn').getAttribute('aria-pressed'), 'true', 'Enter should review the current line');
+  assert.equal(await navigationPage.locator('#previewOverlay.active').count(), 1, 'Enter should keep the preview open');
+  await navigationPage.keyboard.press('Enter');
+  assert.equal(await previewRows.first().locator('.inv-review-btn').getAttribute('aria-pressed'), 'false', 'Enter again should unreview the line');
+  await navigationPage.keyboard.press('ArrowRight');
+  await navigationPage.waitForFunction(() => document.querySelector('#previewPdf').src.startsWith('blob:'));
+  const secondFilename = await navigationPage.locator('#previewFilename').textContent();
+  assert.notEqual(secondFilename, firstFilename, 'right should follow displayed row order');
+  await navigationPage.keyboard.press('Enter');
+  assert.equal(await previewRows.last().locator('.inv-review-btn').getAttribute('aria-pressed'), 'true', 'Enter after navigation must review the new line');
+  assert.equal(await previewRows.first().locator('.inv-review-btn').getAttribute('aria-pressed'), 'false');
+  await navigationPage.keyboard.press('ArrowRight');
+  assert.equal(await navigationPage.locator('#previewFilename').textContent(), secondFilename, 'right at the last line should stop');
+  await navigationPage.keyboard.press('ArrowLeft');
+  assert.equal(await navigationPage.locator('#previewFilename').textContent(), firstFilename);
+  assert.equal(await navigationPage.locator('#previewReviewBtn').getAttribute('aria-pressed'), 'false');
+  await navigationPage.keyboard.press('Escape');
+  await navigationPage.keyboard.press('Enter');
+  assert.equal(await previewRows.first().locator('.inv-review-btn').getAttribute('aria-pressed'), 'false', 'closed preview shortcuts must be inactive');
+  await navigationPage.close();
 
   const compactPage = await browser.newPage({ viewport: { width: 320, height: 700 } });
   await compactPage.addInitScript(() => {
