@@ -57,6 +57,7 @@ let invoicePartyDisplay = 'source';
 let invoicesActive = false;
 let invoicesLoading = false;
 let invoiceLoadingRequests = 0;
+let invoicePushInFlight = false;
 let xeroConnected = false;
 let xeroAccounts = null;
 let xeroTaxTypes = null;
@@ -767,7 +768,7 @@ function renderInvoiceSection(bucket, lines, accounts) {
     ? `<button type="button" class="btn-secondary invoice-clear-stamps-btn" data-bucket="${bucket}">Clear stale draft stamps</button>`
     : '';
   const pushActions = pushable.length > 0
-    ? `<button type="button" class="btn-primary invoice-push-btn" data-bucket="${bucket}" ${allReviewed ? '' : 'disabled'}>Push to Xero (draft)</button>
+    ? `<button type="button" class="btn-primary invoice-push-btn" data-bucket="${bucket}" ${allReviewed && !invoicePushInFlight ? '' : 'disabled'}>${invoicePushInFlight ? 'Pushing…' : 'Push to Xero (draft)'}</button>
           <button type="button" class="btn-secondary invoice-download-btn" data-bucket="${bucket}">Download receipts PDF</button>
           <button type="button" class="btn-secondary invoice-claim-checked-btn" data-bucket="${bucket}" ${checkedCount ? '' : 'disabled'}>Mark checked as claimed</button>
           <span class="${noteClass}">${escapeHtml(invoicePushNote(bucket))}</span>`
@@ -1239,7 +1240,10 @@ function updateSectionHeaders() {
     const meta = section.querySelector('.invoice-section-meta');
     if (meta) meta.textContent = invoiceSectionMeta(bucket, lines, total);
     const pushBtn = section.querySelector('.invoice-push-btn');
-    if (pushBtn) pushBtn.disabled = pushable.length === 0 || !allReviewed;
+    if (pushBtn) {
+      pushBtn.disabled = invoicePushInFlight || pushable.length === 0 || !allReviewed;
+      pushBtn.textContent = invoicePushInFlight ? 'Pushing…' : 'Push to Xero (draft)';
+    }
     const claimBtn = section.querySelector('.invoice-claim-checked-btn');
     if (claimBtn) claimBtn.disabled = pushable.filter(isLineReviewed).length === 0;
     const note = section.querySelector('.invoice-doc-note');
@@ -2079,6 +2083,7 @@ function invoicePushSummary(bucket, lines) {
 }
 
 async function pushInvoice(bucket, btn) {
+  if (invoicePushInFlight) return;
   if (claimsLoadErrorMessage) {
     showStatus('error', INVOICE_CLAIMS_UNAVAILABLE_TEXT);
     return;
@@ -2109,8 +2114,8 @@ async function pushInvoice(bucket, btn) {
   );
   if (reference === null) return;
 
-  btn.disabled = true;
-  btn.textContent = 'Pushing…';
+  invoicePushInFlight = true;
+  updateSectionHeaders();
   showStatus('uploading', `Creating ${BUCKET_LABEL[bucket]} draft and attaching ${lines.length} receipt(s)...`);
   try {
     lines.forEach(normaliseLineForSection);
@@ -2166,8 +2171,8 @@ async function pushInvoice(bucket, btn) {
   } catch (err) {
     showStatus('error', `Push failed: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
-    btn.disabled = false;
-    btn.textContent = 'Push to Xero (draft)';
+    invoicePushInFlight = false;
+    updateSectionHeaders();
   }
 }
 
@@ -2269,6 +2274,7 @@ export function showInvoicesView(show, { refresh = true } = {}) {
   if (show) {
     clearSelection();
   }
+  if (invoicesActive && !show) closePreview();
   invoicesActive = show;
   document.body.classList.toggle('invoices-active', show);
   if (claimsView) claimsView.hidden = show;

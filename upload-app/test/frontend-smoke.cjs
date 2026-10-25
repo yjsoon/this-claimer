@@ -993,6 +993,52 @@ async function main() {
   });
   await badgePush.click();
   assert.ok(pushSummary.includes('3 lines · S$41.34'), 'submission confirmation must use the edited amount after background refresh');
+  let releasePush;
+  let pushStarted;
+  const pendingPush = new Promise((resolve) => { releasePush = resolve; });
+  const startedPush = new Promise((resolve) => { pushStarted = resolve; });
+  const submittedBills = [];
+  await badgePage.route('**/xero/invoices/push', async (route) => {
+    submittedBills.push(route.request().postDataJSON());
+    pushStarted();
+    await pendingPush;
+    await route.fulfill(submittedBills.length === 1
+      ? { status: 500, json: { error: 'Test push failed' } }
+      : { json: { invoiceID: 'retry-bill', invoiceNumber: 'RETRY', attachments: [], allAttached: true } });
+  });
+  badgePage.once('dialog', (dialog) => dialog.accept('Pending bill'));
+  await badgePush.click();
+  await startedPush;
+  await badgePage.evaluate(async () => {
+    const { loadReceipts } = await import('/claims.js?v=20261015-ai');
+    await loadReceipts();
+  });
+  assert.equal(await badgePush.isDisabled(), true, 'background refresh must preserve the in-flight push lock');
+  await readyRow.locator('[data-field="amount"]').click();
+  await readyRow.locator('[data-field="amount"] input').fill('14');
+  await badgePage.keyboard.press('Enter');
+  assert.equal(await badgePush.isDisabled(), true, 'editing must not re-enable a pending push');
+  assert.equal(submittedBills.length, 1);
+  assert.equal(submittedBills[0].lineItems.reduce((sum, line) => sum + line.amount, 0), 41.34);
+  releasePush();
+  await badgePage.waitForFunction(() => document.querySelector('#status')?.textContent?.includes('Test push failed'));
+  assert.equal(await badgePush.isEnabled(), true, 'failed push must release the current button for retry');
+  badgePage.once('dialog', (dialog) => dialog.accept('Retry bill'));
+  await badgePush.click();
+  await badgePage.waitForFunction(() => document.querySelector('#status')?.textContent?.includes('Created draft bill RETRY'));
+  await badgePage.waitForFunction(() => !document.querySelector('.invoice-section[data-bucket="nongst"] .invoice-push-btn')?.disabled);
+  assert.equal(submittedBills.length, 2, 'retry should send one new request after the failure');
+  assert.equal(submittedBills[1].lineItems.reduce((sum, line) => sum + line.amount, 0), 42.34);
+
+  await readyRow.locator('.inv-preview-btn').click();
+  await badgePage.waitForSelector('#previewOverlay.active');
+  await badgePage.goBack();
+  assert.equal(await badgePage.locator('#claimsView').isVisible(), true);
+  assert.equal(await badgePage.locator('#previewOverlay').evaluate((el) => el.classList.contains('active')), false,
+    'leaving Invoices with browser Back must close its preview');
+  await badgePage.keyboard.press('Enter');
+  await badgePage.locator('#navInvoices').click();
+  await badgePage.waitForSelector('.invoice-section tr[data-id]');
   await badgePage.locator('#claimsBackend').selectOption('ynab');
   await badgePage.waitForFunction(() => document.querySelectorAll('.invoice-section tr[data-id]').length === 2);
   assert.equal(await badgePage.locator('#invoicesNavBadge').textContent(), '2',
