@@ -101,7 +101,7 @@ export function initPreview() {
   previewReviewBtn.addEventListener('click', () => {
     if (!previewReviewAction) return;
     previewReviewAction(true);
-    closePreview();
+    if (!previewNavigateAction?.(1)) closePreview();
   });
   document.addEventListener('keydown', (e) => {
     if (!previewOverlay.classList.contains('active')) return;

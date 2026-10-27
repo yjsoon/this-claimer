@@ -44,6 +44,11 @@ checked as claimed** action. That action tags the receipts and flips linked
 `TODO:` memos to `CLAIMED:` in their originating backend; creating the draft
 alone does not change claim memos.
 
+In an invoice receipt preview, **← / →** move between lines without wrapping,
+**Enter** toggles reviewed/unreviewed without moving, and **Escape** closes.
+Clicking the **tick** confirms the current line and opens the next preview;
+confirming the final line closes the preview. The tick never unreviews a line.
+
 Manual line edits (including Type/section, tax, account, memo, amount, remark and
 review state) are shared with other browsers and agents on reload or **Refresh**.
 AI GST tags remain the original printed-receipt finding; manual invoice tax

@@ -952,6 +952,24 @@ async function main() {
   await navigationPage.keyboard.press('Escape');
   await navigationPage.keyboard.press('Enter');
   assert.equal(await previewRows.first().locator('.inv-review-btn').getAttribute('aria-pressed'), 'false', 'closed preview shortcuts must be inactive');
+
+  await previewRows.last().locator('.inv-review-btn').click();
+  await previewRows.first().locator('.inv-preview-btn').click();
+  await navigationPage.locator('#previewReviewBtn').click();
+  assert.equal(await previewRows.first().locator('.inv-review-btn').getAttribute('aria-pressed'), 'true', 'tick must confirm the original line');
+  assert.equal(await navigationPage.locator('#previewOverlay.active').count(), 1, 'tick should keep the next preview open');
+  assert.equal(await navigationPage.locator('#previewFilename').textContent(), secondFilename, 'tick should advance in the same order as ArrowRight');
+  assert.equal(await navigationPage.locator('#previewReviewBtn').getAttribute('aria-pressed'), 'false', 'advancing must not review the next line');
+  await navigationPage.locator('#previewReviewBtn').click();
+  await navigationPage.waitForSelector('#previewOverlay:not(.active)');
+  assert.equal(await previewRows.last().locator('.inv-review-btn').getAttribute('aria-pressed'), 'true', 'last tick should confirm and close without wrapping');
+  await previewRows.last().locator('.inv-preview-btn').click();
+  await navigationPage.locator('#previewReviewBtn').click();
+  await navigationPage.waitForSelector('#previewOverlay:not(.active)');
+  assert.equal(await previewRows.last().locator('.inv-review-btn').getAttribute('aria-pressed'), 'true', 'tick on an already reviewed line must not toggle it off');
+  await navigationPage.waitForFunction(() => document.querySelectorAll('.invoice-section .invoice-push-btn:disabled').length === 0);
+  await navigationPage.reload({ waitUntil: 'networkidle' });
+  assert.equal(await navigationPage.locator('.inv-review-btn[aria-pressed="true"]').count(), 2, 'both confirmations must persist across reload');
   await navigationPage.close();
 
   const compactPage = await browser.newPage({ viewport: { width: 320, height: 700 } });
@@ -1299,6 +1317,7 @@ async function main() {
   await badgePage.keyboard.press('Enter');
   await readyRow.locator('.inv-preview-btn').click();
   await badgePage.locator('#previewReviewBtn').click();
+  await badgePage.keyboard.press('Escape');
   const unreviewedRows = badgePage.locator('.invoice-section .inv-review-btn[aria-pressed="false"]');
   while (await unreviewedRows.count()) await unreviewedRows.first().click();
   const badgePush = badgePage.locator('.invoice-section[data-bucket="nongst"] .invoice-push-btn');

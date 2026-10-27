@@ -1239,7 +1239,10 @@ function attachInvoiceRowEditors(tr, line, accounts) {
       onNavigate: (direction) => {
         const buttons = [...invoicesSectionsEl.querySelectorAll('.inv-preview-btn')];
         const index = buttons.indexOf(tr.querySelector('.inv-preview-btn'));
-        buttons[index + direction]?.click();
+        const next = index >= 0 ? buttons[index + direction] : null;
+        if (!next) return false;
+        next.click();
+        return true;
       },
     });
   });
