@@ -349,6 +349,10 @@ function saveInvoiceEdit(lineId, patch) {
 
 function saveLastPushResult(data, warnings, payload) {
   try {
+    const previous = loadLastPushResult();
+    if (previous?.data?.invoiceID !== data.invoiceID && previous?.payload) {
+      rememberPushedInvoice(previous.data, previous.payload);
+    }
     localStorage.setItem(INVOICE_LAST_PUSH_KEY, JSON.stringify({
       data,
       warnings,
@@ -420,7 +424,37 @@ function rememberPushedInvoice(data, payload) {
       savedAt,
     };
   });
-  writePushHistory({ byLine });
+  const bills = history.bills || [];
+  if (!bills.some(bill => bill.invoiceID === data.invoiceID)) {
+    bills.push({
+      invoiceID: data.invoiceID,
+      invoiceNumber: data.invoiceNumber || '',
+      bucket: payload.bucket,
+      reference: payload.reference || '',
+      lineCount: payload.lineItems.length,
+      total: payload.lineItems.reduce((sum, item) => sum + Number(item.amount), 0),
+      needsAttachmentReview: data.allAttached === false,
+      savedAt,
+    });
+  }
+  writePushHistory({ ...history, byLine, bills });
+}
+
+function renderPushHistory() {
+  const container = document.getElementById('invoicePushHistory');
+  if (!container) return;
+  const activeID = invoiceLines.length && !claimsLoadErrorMessage ? loadLastPushResult()?.data?.invoiceID : null;
+  const bills = (loadPushHistory().bills || []).filter(bill => bill.invoiceID !== activeID);
+  container.hidden = bills.length === 0;
+  container.innerHTML = bills.length ? `
+    <details class="invoice-push-result">
+      <summary>Previous drafts (${bills.length})</summary>
+      <p>Saved in this browser. Starting a new draft never resends these lines or marks them claimed.</p>
+      <ul class="attach-list">${[...bills].reverse().map(bill => `
+        <li><a href="https://go.xero.com/AccountsPayable/Edit.aspx?InvoiceID=${encodeURIComponent(bill.invoiceID)}" target="_blank" rel="noopener noreferrer">${escapeHtml(bill.invoiceNumber || bill.invoiceID)}</a>
+          · ${escapeHtml(bill.reference || BUCKET_LABEL[bill.bucket] || '')}
+          · ${Number(bill.lineCount)} line${Number(bill.lineCount) === 1 ? '' : 's'} · S$${Number(bill.total).toFixed(2)}${bill.needsAttachmentReview ? ' · Check attachments in Xero' : ''}</li>`).join('')}</ul>
+    </details>` : '';
 }
 
 function rememberedInvoiceIDForItem(item) {
@@ -1418,6 +1452,7 @@ function bindInvoiceSectionEvents() {
 }
 
 function renderInvoiceEditor() {
+  renderPushHistory();
   if (claimsLoadErrorMessage) {
     renderInvoiceClaimLoadError();
     return;
@@ -2147,6 +2182,22 @@ async function markCheckedSectionClaimed(bucket, btn) {
 function bindPushResultActions(bucket, data, payload) {
   const container = sectionStatusEl(bucket);
   if (!container) return;
+  container.querySelector('[data-action="new-draft"]')?.addEventListener('click', () => {
+    if (invoicePushInFlight) return;
+    // Keep both the bill summary and per-line ownership. Only dismiss the
+    // completed result: resetting accounting stamps would permit duplicates.
+    rememberPushedInvoice(data, payload);
+    clearLastPushResult();
+    renderInvoiceEditor();
+    const nextLine = bucketReviewState(bucket).pushable[0];
+    const row = nextLine && [...invoicesSectionsEl.querySelectorAll('tr[data-id]')]
+      .find(row => row.dataset.id === nextLine.id);
+    if (row) row.closest('details').open = true;
+    (row?.querySelector('.inv-review-btn') || invoicesRefreshBtn)?.focus();
+    showStatus('success', nextLine
+      ? 'New draft ready. Review the remaining lines, then push checked lines to Xero. Previous drafts are kept below.'
+      : 'New draft ready. No unpushed lines remain in this section. Add or link more receipts, then refresh. Previous drafts are kept below.');
+  });
   const downloadBtn = container.querySelector('[data-action="download-receipts-pdf"]');
   if (downloadBtn) {
     downloadBtn.addEventListener('click', () => downloadReceiptsPdf(payload, downloadBtn));
@@ -2178,6 +2229,7 @@ function showSectionPushResult(bucket, data, warnings, payload, { persist = true
       <p><strong>${escapeHtml(summary)}</strong></p>
       <div class="invoice-result-actions">
         <a class="btn-primary invoice-result-link" href="${escapeHtml(xeroUrl)}" target="_blank" rel="noopener">Open draft in Xero</a>
+        <button type="button" class="btn-secondary" data-action="new-draft">Start new draft</button>
         <button type="button" class="btn-secondary" data-action="download-receipts-pdf">Download receipts PDF</button>
         <button type="button" class="btn-primary" data-action="mark-checked-claimed">Mark ${checkedCount || 'checked'} as claimed</button>
       </div>
@@ -2188,6 +2240,7 @@ function showSectionPushResult(bucket, data, warnings, payload, { persist = true
   if (!container) return;
   container.innerHTML = html;
   if (persist) saveLastPushResult(data, warnings, payload);
+  renderPushHistory();
   bindPushResultActions(bucket, data, payload);
   if (scroll) container.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
