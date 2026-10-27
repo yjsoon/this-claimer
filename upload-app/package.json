@@ -8,6 +8,7 @@
     "pages:dev": "wrangler pages dev src --compatibility-date=2024-01-01",
     "smoke:frontend": "node test/frontend-smoke.cjs",
     "smoke:worker-claims": "node test/worker-claims.cjs",
+    "test:xero": "node test/xero-subsets.cjs",
     "test:gmail": "node test/gmail-scan.cjs",
     "test:ai": "node test/ai-settings.cjs",
     "test:access": "node test/access.cjs",

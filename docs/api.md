@@ -23,6 +23,23 @@ All endpoints require the `X-Auth-Token` header, except the OAuth redirect targe
 
 `GET /list` and `GET /ynab/todos` also return a `Server-Timing` header; see [AGENTS.md](../AGENTS.md) for the Gmail, GST-tagging and diagnostics routes.
 
+### Xero subset pushes
+
+`POST /xero/invoices/push` invoices exactly its `lineItems`, not every ready line.
+Send only the reviewed subset. The browser also sends `invoiceRevisions`, a map
+from each selected receipt key to the exact `invoiceEdits.revision` last read
+(including `null` for an unedited receipt). Stale revisions and overlapping pushes
+return 409 before bill creation. Resolve conflicts deliberately; do not blindly
+retry with a newer revision or change the reference to evade ownership checks.
+
+`invoiceEdits.xero` is optional, server-owned state keyed by `backend::claimId`
+(receipt-only lines use `backend::receipt-ready:<receipt-key>`). It stores the
+reserved push key/time, then the bill ID/number and, after marking claimed, the
+claimed timestamp. Manual PATCH/reset preserves it and cannot modify it. A known
+bill is reused on an exact retry; an unknown result may retry the same payload
+only within five minutes. After that, reconcile against Xero manually. The old
+receipt-wide `xeroPending*` stamps are not authoritative per-line state.
+
 ## Shared invoice line overrides (agents and browsers)
 
 Manual invoice edits are stored as separate JSON objects in the existing R2 bucket,

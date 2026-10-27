@@ -5,6 +5,52 @@ export const INVOICE_EDITS_PREFIX = '__invoice_edits/';
 export interface InvoiceEdits {
   revision: string | null;
   lines: Record<string, Record<string, unknown>>;
+  xero?: Record<string, { pushKey: string; reservedAt?: number; invoiceID?: string; invoiceNumber?: string; claimedAt?: string }>;
+}
+
+export class InvoiceXeroConflict extends Error {}
+
+export function assertInvoiceXero(
+  current: InvoiceEdits, lineIds: string[], pushKey: string,
+  result?: { invoiceID: string }, revision?: string | null,
+): void {
+  for (const id of lineIds) {
+    const state = current.xero?.[id];
+    if (state && (state.pushKey !== pushKey || (result && state.invoiceID && state.invoiceID !== result.invoiceID))) {
+      throw new InvoiceXeroConflict('A selected line already belongs to another Xero push. Refresh before retrying.');
+    }
+    // Xero retains keys for six minutes. Never risk creating a duplicate after
+    // an unknown outcome has outlived that window (leave a one-minute margin).
+    if (!result && state && !state.invoiceID && Date.now() - (state.reservedAt || 0) > 5 * 60 * 1000) {
+      throw new InvoiceXeroConflict('Xero push outcome is unknown and its safe retry window expired. Check Xero before reconciling this line; do not push it again.');
+    }
+  }
+  if (!result && revision !== undefined && revision !== current.revision
+    && !lineIds.every(id => current.xero?.[id]?.pushKey === pushKey)) {
+    throw new InvoiceXeroConflict('Invoice edits changed. Refresh and review before pushing.');
+  }
+}
+
+// Server-owned, per-line accounting state shares the receipt's atomic CAS boundary
+// with edits. A reserved line may only retry the identical Xero idempotency key.
+export async function updateInvoiceXero(
+  bucket: R2Bucket, key: string, lineIds: string[], pushKey: string,
+  result?: { invoiceID: string; invoiceNumber?: string; claimedAt?: string },
+  revision?: string | null,
+): Promise<void> {
+  const storageKey = INVOICE_EDITS_PREFIX + key;
+  const object = await bucket.get(storageKey);
+  const current: InvoiceEdits = object ? await object.json() : { revision: null, lines: {} };
+  assertInvoiceXero(current, lineIds, pushKey, result, revision);
+  const states = { ...current.xero };
+  for (const id of lineIds) states[id] = { reservedAt: Date.now(), ...states[id], pushKey, ...result };
+  const written = await bucket.put(storageKey, JSON.stringify({
+    ...current, revision: crypto.randomUUID(), xero: states,
+  }), {
+    onlyIf: object ? { etagMatches: object.etag } : { etagDoesNotMatch: '*' },
+    httpMetadata: { contentType: 'application/json' },
+  });
+  if (!written) throw new InvoiceXeroConflict('Invoice state changed concurrently. Refresh before retrying.');
 }
 
 export async function listInvoiceEditKeys(bucket: R2Bucket): Promise<Set<string>> {
@@ -71,6 +117,7 @@ export async function invoiceEditsResponse(request: Request, bucket: R2Bucket, k
     Object.assign(edits, { reviewed: false, reviewedSnapshot: null, reviewedSourceSnapshot: null });
   }
   const next: InvoiceEdits = {
+    ...current,
     revision: crypto.randomUUID(),
     // An empty entry is a reset tombstone: old localStorage must not resurrect it.
     lines: { ...current.lines, [lineId]: edits },

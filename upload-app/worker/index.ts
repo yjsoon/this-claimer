@@ -6,7 +6,7 @@ import * as gmail from './gmail';
 import * as ai from './ai';
 import { verifyAccess, safeEqual } from './access';
 import { PDFDocument } from 'pdf-lib';
-import { INVOICE_EDITS_PREFIX, listInvoiceEditKeys, readInvoiceEdits, invoiceEditsResponse, type InvoiceEdits } from './invoice-edits';
+import { INVOICE_EDITS_PREFIX, listInvoiceEditKeys, readInvoiceEdits, invoiceEditsResponse, assertInvoiceXero, updateInvoiceXero, InvoiceXeroConflict, type InvoiceEdits } from './invoice-edits';
 
 const assetManifest = JSON.parse(manifestJSON);
 
@@ -1633,6 +1633,10 @@ function resolveMutationBackend(value: unknown, lineItems: PushLineItem[]): Clai
   return lineBackends[0] || bodyBackend;
 }
 
+function xeroLineId(line: PushLineItem, backend: ClaimsBackend): string {
+  return `${line.claimsBackend || backend}::${line.ynabClaimId || `receipt-ready:${line.receiptKey}`}`;
+}
+
 function nonGstTaxTypeForCurrency(currency?: string): string {
   const normalized = (currency || 'SGD').toUpperCase();
   return normalized !== 'SGD' && normalized !== 'UNKNOWN' ? 'OPINPUT' : 'NRINPUT';
@@ -2941,6 +2945,13 @@ export default {
           const backend = resolveMutationBackend(body.backend, lineItems);
 
           const claimedDate = singaporeToday();
+          // Verify bill ownership before changing any upstream claim memo.
+          for (const line of lineItems) {
+            const state = (await readInvoiceEdits(env.RECEIPTS, line.receiptKey)).xero?.[xeroLineId(line, backend)];
+            if (state && state.invoiceID !== invoiceID) {
+              throw new InvoiceXeroConflict('A selected line does not belong to this Xero bill. Refresh before marking claimed.');
+            }
+          }
           const claims = Array.from(
             new Map(
               lineItems
@@ -2977,14 +2988,13 @@ export default {
           const taggedReceipts: Array<{ key: string; status: string }> = [];
           for (const key of uniqueKeys) {
             try {
-              await patchReceiptMetadata(env, key, {
-                xeroInvoiceId: invoiceID,
-                invoicedAt,
-                xeroPendingInvoiceId: undefined,
-                xeroPendingInvoiceNumber: undefined,
-                xeroPendingAt: undefined,
-                xeroPendingClaimsBackend: undefined,
-              });
+              const current = await readInvoiceEdits(env.RECEIPTS, key);
+              for (const line of lineItems.filter(item => item.receiptKey === key)) {
+                const id = xeroLineId(line, backend);
+                await updateInvoiceXero(env.RECEIPTS, key, [id], current.xero?.[id]?.pushKey || `legacy:${invoiceID}`, {
+                  invoiceID, claimedAt: invoicedAt,
+                });
+              }
               taggedReceipts.push({ key, status: 'tagged' });
             } catch (err) {
               taggedReceipts.push({ key, status: `failed: ${cleanError(err)}` });
@@ -2998,7 +3008,7 @@ export default {
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Failed to mark claims as claimed';
           return new Response(JSON.stringify({ error: message }), {
-            status: err instanceof ClaimsBackendInputError ? 400 : 502,
+            status: err instanceof InvoiceXeroConflict ? 409 : err instanceof ClaimsBackendInputError ? 400 : 502,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         }
@@ -3014,6 +3024,7 @@ export default {
             lineItems?: PushLineItem[];
             receiptPdf?: unknown;
             backend?: unknown;
+            invoiceRevisions?: Record<string, string | null>;
           };
           const lineItems = parsePushLineItems(body.lineItems).map((l) => ({
             ...l,
@@ -3034,15 +3045,39 @@ export default {
           // the bill by a day when pushing between 00:00 and 07:59 SGT.
           const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Singapore' }).format(new Date());
           const dueDate = addCalendarDays(today, 30);
-          // Deterministic key over the full line shape (sorted, order-independent):
-          // an identical re-push dedupes, but editing account/tax/description/amount
-          // produces a new key so edits aren't silently swallowed by Xero.
+          // Include claim identity: equal amounts/descriptions on a shared receipt
+          // can still be distinct bill lines. An exact retry keeps the same key.
           const lineKeys = lineItems
-            .map((l) => `${l.receiptKey}:${Number(l.amount).toFixed(2)}:${l.accountCode}:${l.taxType}:${l.description}`)
+            .map((l) => JSON.stringify([l.receiptKey, xeroLineId(l, backend), Number(l.amount).toFixed(2), l.accountCode, l.taxType, l.description]))
             .sort();
+          if (new Set(lineItems.map(line => JSON.stringify([line.receiptKey, xeroLineId(line, backend)]))).size !== lineItems.length) {
+            throw new ClaimsBackendInputError('A bill cannot contain the same invoice line twice.');
+          }
           const idem = await xero.idempotencyKey(['claim-bill', backend, body.bucket || '', body.reference || '', ...lineKeys]);
 
-          const bill = await xero.createBill(env, {
+          // Reserve only the submitted subset. CAS with edit revisions prevents a
+          // stale browser or overlapping subset from creating another bill.
+          const receiptKeys = Array.from(new Set(lineItems.map(line => line.receiptKey))).sort();
+          for (const key of receiptKeys) {
+            if (key.startsWith(INVOICE_EDITS_PREFIX) || !(await env.RECEIPTS.head(key))) {
+              throw new ClaimsBackendInputError('Selected receipt no longer exists.');
+            }
+            assertInvoiceXero(await readInvoiceEdits(env.RECEIPTS, key),
+              lineItems.filter(line => line.receiptKey === key).map(line => xeroLineId(line, backend)),
+              idem, undefined, body.invoiceRevisions?.[key]);
+          }
+          for (const key of receiptKeys) {
+            await updateInvoiceXero(env.RECEIPTS, key,
+              lineItems.filter(line => line.receiptKey === key).map(line => xeroLineId(line, backend)),
+              idem, undefined, body.invoiceRevisions?.[key]);
+          }
+
+          const knownBills = await Promise.all(lineItems.map(async line =>
+            (await readInvoiceEdits(env.RECEIPTS, line.receiptKey)).xero?.[xeroLineId(line, backend)]));
+          const remembered = knownBills.find(state => state?.invoiceID);
+          const bill = remembered?.invoiceID ? {
+            invoiceID: remembered.invoiceID, invoiceNumber: remembered.invoiceNumber || '', url: '',
+          } : await xero.createBill(env, {
             contactName: 'Soon Yin Jie',
             date: today,
             dueDate,
@@ -3055,6 +3090,13 @@ export default {
               amount: Number(l.amount),
             })),
           });
+
+          // Remember ownership before attachment work. Failure is fail-closed:
+          // retry the identical request/key, never construct an overlapping bill.
+          for (const key of receiptKeys) {
+            await updateInvoiceXero(env.RECEIPTS, key,
+              lineItems.filter(line => line.receiptKey === key).map(line => xeroLineId(line, backend)), idem, bill);
+          }
 
           // Attach receipts serially (Xero allows 5 concurrent; serial is safe).
           const browserPdf = uploadFromBrowserReceiptPdf(body.receiptPdf);
@@ -3126,7 +3168,7 @@ export default {
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Failed to push invoice to Xero';
           return new Response(JSON.stringify({ error: message }), {
-            status: err instanceof ClaimsBackendInputError ? 400 : 502,
+            status: err instanceof InvoiceXeroConflict ? 409 : err instanceof ClaimsBackendInputError ? 400 : 502,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         }

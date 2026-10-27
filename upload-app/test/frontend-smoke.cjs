@@ -179,7 +179,7 @@ async function main() {
         if (mockState.failInvoiceSave || mockState.failInvoiceClaimId === body.claimId) return route.fulfill({ status: 503, json: { error: 'Save unavailable' } });
         if (body.revision !== current.revision) return route.fulfill({ status: 409, json: { ...current, error: 'Invoice edits changed' } });
         const id = `${body.backend}::${body.claimId}`;
-        receipt.invoiceEdits = { revision: String(Number(current.revision || 0) + 1), lines: {
+        receipt.invoiceEdits = { ...current, revision: String(Number(current.revision || 0) + 1), lines: {
           ...current.lines, [id]: { ...current.lines[id], ...body.patch },
         } };
         if (Object.keys(body.patch).some(field => !field.startsWith('review')) && !Object.hasOwn(body.patch, 'reviewed')) {
@@ -703,6 +703,9 @@ async function main() {
     throw new Error(`mark claimed line should retain the original claim description, got ${markClaimRequests[0].lineItems[0].claimDescription}`);
   }
   primaryMockState.delayMarkClaimed = false;
+  // The mock leaves the claimed receipt visible for the independent legacy
+  // review-snapshot scenarios below; remove its fake pushed history too.
+  await page.evaluate(() => localStorage.removeItem('claim_manager_invoice_push_history'));
 
   let taxCell = page.locator('.invoice-section[data-bucket="nongst"] [data-label="Tax"]');
   const taxText = await taxCell.locator('.inv-cell-text').textContent();
@@ -1323,6 +1326,75 @@ async function main() {
   await other.close();
   console.log('Shared Foodpanda overrides passed (legacy migration, stale local backup, two browsers, review, agent conflict, failed save, unchanged AI GST)');
 
+  const subsetState = {
+    receipts: [
+      { key: 'shared-subset.pdf', originalName: 'Shared receipt.pdf', linkedClaimIds: ['subset-a', 'subset-b'], linkedClaimsBackend: 'howmuch', taggedGstShown: true },
+      { key: 'later-subset.pdf', originalName: 'Later receipt.pdf', linkedClaimIds: ['subset-c'], linkedClaimsBackend: 'howmuch', taggedGstShown: true },
+    ],
+    todos: [
+      { id: 'subset-a', date: '2026-10-01', description: 'First workshop', amount: 10.90 },
+      { id: 'subset-b', date: '2026-10-02', description: 'Second workshop', amount: 21.80 },
+      { id: 'subset-c', date: '2026-10-03', description: 'Later workshop', amount: 7 },
+    ],
+  };
+  const subsetBills = [];
+  async function subsetBrowser() {
+    const context = await browser.newContext();
+    await context.addInitScript(() => {
+      localStorage.setItem('claim_manager_auth', 'test');
+      localStorage.setItem('claim_manager_remember', 'true');
+    });
+    const p = await context.newPage();
+    await setupMockApi(p, subsetState);
+    await p.route('**/xero/invoices/push', async route => {
+      const payload = route.request().postDataJSON();
+      subsetBills.push(payload);
+      const invoiceID = `subset-bill-${subsetBills.length}`;
+      for (const item of payload.lineItems) {
+        const receipt = subsetState.receipts.find(r => r.key === item.receiptKey);
+        receipt.invoiceEdits.xero = { ...receipt.invoiceEdits.xero,
+          [`${item.claimsBackend}::${item.ynabClaimId}`]: { pushKey: invoiceID, invoiceID } };
+        receipt.invoiceEdits.revision = String(Number(receipt.invoiceEdits.revision) + 1);
+      }
+      await route.fulfill({ json: { invoiceID, invoiceNumber: invoiceID, attachments: [], allAttached: true } });
+    });
+    await p.goto(`http://127.0.0.1:${port}/invoices`, { waitUntil: 'networkidle' });
+    await p.waitForSelector('.invoice-section tr[data-id]');
+    return p;
+  }
+  let subsetPage = await subsetBrowser();
+  const subsetPush = () => subsetPage.locator('.invoice-section[data-bucket="gst"] .invoice-push-btn');
+  const subsetRow = id => subsetPage.locator(`tr[data-id="howmuch::shared-subset.pdf::${id}"]`);
+  assert.equal(await subsetPush().isDisabled(), true);
+  await subsetRow('subset-a').locator('.inv-review-btn').click();
+  assert.equal(await subsetPush().isEnabled(), true);
+  subsetPage.once('dialog', dialog => dialog.accept('First subset'));
+  await subsetPush().click();
+  await subsetPage.waitForFunction(() => document.querySelector('#status').textContent.includes('Created draft bill subset-bill-1'));
+  assert.deepEqual(subsetBills[0].lineItems.map(item => [item.ynabClaimId, item.amount, item.taxType]), [['subset-a', 10.90, 'INPUTY24']]);
+  assert.ok(subsetBills[0].lineItems[0].description.includes('Receipt: p. 1'));
+  assert.equal((await require('pdf-lib').PDFDocument.load(Buffer.from(subsetBills[0].receiptPdf.base64, 'base64'))).getPageCount(), 1);
+  // A fresh browser has no local push history. Shared ownership must still
+  // suppress the first line while keeping its unchecked sibling available.
+  await subsetPage.context().close();
+  subsetPage = await subsetBrowser();
+  assert.equal(await subsetRow('subset-a').getByText('Draft pushed', { exact: true }).count(), 1);
+  assert.equal(await subsetPush().isDisabled(), true, 'already pushed review is not a new selection in another browser');
+  assert.equal(await subsetRow('subset-b').locator('.inv-review-btn').getAttribute('aria-pressed'), 'false');
+  await subsetRow('subset-b').locator('.inv-review-btn').click();
+  await subsetPage.locator('tr[data-id="howmuch::later-subset.pdf::subset-c"] .inv-review-btn').click();
+  subsetPage.once('dialog', dialog => dialog.accept('Remaining subset'));
+  await subsetPush().click();
+  await subsetPage.waitForFunction(() => document.querySelector('#status').textContent.includes('Created draft bill subset-bill-2'));
+  assert.deepEqual(subsetBills[1].lineItems.map(item => item.ynabClaimId), ['subset-b', 'subset-c']);
+  assert.equal(subsetBills[1].lineItems.reduce((sum, item) => sum + item.amount, 0), 28.80);
+  assert.equal((await require('pdf-lib').PDFDocument.load(Buffer.from(subsetBills[1].receiptPdf.base64, 'base64'))).getPageCount(), 2);
+  await subsetPage.reload({ waitUntil: 'networkidle' });
+  assert.equal(await subsetPush().isDisabled(), true, 'all pushed lines must stay excluded after reload');
+  assert.equal(await subsetPage.getByText('Draft pushed', { exact: true }).count(), 3);
+  await subsetPage.context().close();
+  console.log('Invoice subset browser contract passed (zero, partial, payload/tax/PDF, fresh browser, subsequent/all, reload)');
+
   const badgePage = await browser.newPage();
   await badgePage.addInitScript(() => {
     localStorage.setItem('claim_manager_auth', 'test');
@@ -1365,6 +1437,23 @@ async function main() {
   while (await unreviewedRows.count()) await unreviewedRows.first().click();
   const badgePush = badgePage.locator('.invoice-section[data-bucket="nongst"] .invoice-push-btn');
   assert.equal(await badgePush.isEnabled(), true, 'review after background refresh must update the submitted model');
+  // Review only one of two claims sharing a receipt. The sibling and ready-only
+  // line must not leak into the bill or its receipt page plan.
+  const firstClaimRow = badgePage.locator('tr[data-id="howmuch::two-claims.pdf::claim-1"]');
+  const secondClaimRow = badgePage.locator('tr[data-id="howmuch::two-claims.pdf::claim-2"]');
+  await firstClaimRow.locator('.inv-review-btn').click();
+  await secondClaimRow.locator('.inv-review-btn').click();
+  await readyRow.locator('.inv-review-btn').click();
+  assert.equal(await badgePush.isDisabled(), true, 'zero checked lines must not enable Push');
+  await firstClaimRow.locator('.inv-review-btn').click();
+  assert.equal(await badgePush.isEnabled(), true, 'one checked line must enable a subset push');
+  let subsetSummary = '';
+  badgePage.once('dialog', async dialog => { subsetSummary = dialog.message(); await dialog.dismiss(); });
+  await badgePush.click();
+  assert.ok(subsetSummary.includes('1 line · S$16.00'), 'confirmation must total only the checked subset');
+  assert.ok(subsetSummary.includes('2 unchecked'), 'confirmation must explicitly leave unchecked lines for later');
+  await secondClaimRow.locator('.inv-review-btn').click();
+  await readyRow.locator('.inv-review-btn').click();
   let pushSummary = '';
   badgePage.once('dialog', async (dialog) => {
     pushSummary = dialog.message();
@@ -1429,9 +1518,14 @@ async function main() {
   badgePage.once('dialog', (dialog) => dialog.accept('Retry bill'));
   await badgePush.click();
   await badgePage.waitForFunction(() => document.querySelector('#status')?.textContent?.includes('Created draft bill RETRY'));
-  await badgePage.waitForFunction(() => !document.querySelector('.invoice-section[data-bucket="nongst"] .invoice-push-btn')?.disabled);
+  await badgePage.waitForFunction(() => document.querySelector('.invoice-section[data-bucket="nongst"] .invoice-push-btn')?.disabled);
   assert.equal(submittedBills.length, 2, 'retry should send one new request after the failure');
   assert.equal(submittedBills[1].lineItems.reduce((sum, line) => sum + line.amount, 0), 42.34);
+  assert.equal(await badgePush.isDisabled(), true, 'successfully pushed lines must not be offered for another draft');
+  await badgePage.locator('.invoice-section[data-bucket="nongst"] .invoice-claim-checked-btn').click();
+  await badgePage.waitForFunction(() => document.querySelector('#status').textContent.includes('Marked 3 checked'));
+  assert.equal(markClaimRequests.at(-1).lineItems.find(item => item.receiptKey === 'ready.pdf').claimsBackend, 'ynab',
+    'receipt-only claimed state must use the same line identity as its push, even with HowMuch selected');
 
   await readyRow.locator('.inv-preview-btn').click();
   await badgePage.waitForSelector('#previewOverlay.active');
