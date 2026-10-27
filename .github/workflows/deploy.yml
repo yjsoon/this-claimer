@@ -69,10 +69,13 @@ jobs:
           npm run test:ai
           npm run smoke:ai-frontend
 
-      - name: Verify HowMuch secret exists
+      - name: Verify production identity, rollback version, and required secrets
         if: github.event_name == 'push'
         working-directory: upload-app
         run: |
+          npx wrangler whoami
+          npx wrangler deployments list --json \
+            | jq -e 'select(length > 0) | map({id, created_on, versions})'
           npx wrangler secret list --format json \
             | jq -e '([.[].name] | index("HOWMUCH_PAT") != null) and (([.[].name] | index("HOWMUCH_PLAN_ID") != null) or ([.[].name] | index("YNAB_BUDGET_ID") != null))'
         env:
