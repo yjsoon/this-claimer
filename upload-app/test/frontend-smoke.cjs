@@ -196,6 +196,16 @@ async function main() {
       }
       if (url.pathname.startsWith('/receipt/') && url.pathname.endsWith('/link') && route.request().method() === 'DELETE') {
         invoiceUnlinkRequests.push(url.pathname);
+        const key = decodeURIComponent(url.pathname.slice('/receipt/'.length, -'/link'.length));
+        const receipt = (mockState.receipts || [...receiptsPageOne, ...receiptsPageTwo]).find(item => item.key === key);
+        if (receipt && (url.searchParams.get('backend') || 'ynab') !== (receipt.linkedClaimsBackend || 'ynab')) {
+          return route.fulfill({ status: 400, json: { error: 'Receipt link belongs to a different claims backend.' } });
+        }
+        if (receipt) {
+          receipt.linkedClaimIds = [];
+          delete receipt.linkedClaimId;
+          delete receipt.linkedClaimsBackend;
+        }
         return route.fulfill({ json: { success: true } });
       }
       if (url.pathname.startsWith('/receipt/') && url.pathname.endsWith('/xero-pending') && route.request().method() === 'PATCH') {
@@ -1439,6 +1449,38 @@ async function main() {
   assert.equal(await subsetPage.getByText('Draft pushed', { exact: true }).count(), 3);
   await subsetPage.context().close();
   console.log('Invoice subset browser contract passed (zero, partial, payload/tax/PDF, fresh browser, subsequent/all, reload)');
+
+  for (const [selectedBackend, linkedBackend, readyOnly] of [
+    ['howmuch', 'howmuch', false],
+    ['ynab', 'ynab', false],
+    ['ynab', undefined, false],
+    ['howmuch', undefined, true],
+  ]) {
+    const unlinkPage = await browser.newPage();
+    await unlinkPage.addInitScript(backend => {
+      localStorage.setItem('claim_manager_auth', 'test');
+      localStorage.setItem('claim_manager_remember', 'true');
+      localStorage.setItem('claim_manager_backend', backend);
+    }, selectedBackend);
+    const unlinkState = { receipts: [{
+      key: 'unlink.pdf', originalName: 'Unlink receipt.pdf',
+      linkedClaimIds: [readyOnly ? 'receipt-ready:unlink.pdf' : 'claim-1'],
+      linkedClaimsBackend: linkedBackend, taggedAmount: 15, taggedCurrency: 'SGD',
+    }] };
+    await setupMockApi(unlinkPage, unlinkState);
+    await unlinkPage.goto(`http://127.0.0.1:${port}/invoices`, { waitUntil: 'networkidle' });
+    await unlinkPage.waitForSelector('.inv-unlink-btn');
+    unlinkPage.once('dialog', dialog => dialog.accept());
+    const responsePromise = unlinkPage.waitForResponse(response => response.request().method() === 'DELETE');
+    await unlinkPage.locator('.inv-unlink-btn').click();
+    const response = await responsePromise;
+    assert.equal(response.status(), 200, `invoice unlink: selected=${selectedBackend}, stored=${linkedBackend}, readyOnly=${readyOnly}: ${await response.text()}`);
+    await unlinkPage.waitForFunction(() => document.querySelector('#status').textContent.startsWith('Unlinked '));
+    await unlinkPage.waitForFunction(() => document.querySelectorAll('.inv-unlink-btn').length === 0);
+    assert.equal(await unlinkPage.locator('#invoicesEmpty').isVisible(), true, 'unlinked receipt should leave the invoice list');
+    await unlinkPage.close();
+  }
+  console.log('Invoice unlink browser contract passed (HowMuch, YNAB, legacy YNAB, legacy ready-only under HowMuch)');
 
   const badgePage = await browser.newPage();
   await badgePage.addInitScript(() => {
