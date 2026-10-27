@@ -952,7 +952,68 @@ async function main() {
   await navigationPage.keyboard.press('Escape');
   await navigationPage.keyboard.press('Enter');
   assert.equal(await previewRows.first().locator('.inv-review-btn').getAttribute('aria-pressed'), 'false', 'closed preview shortcuts must be inactive');
+
+  await previewRows.last().locator('.inv-review-btn').click();
+  await previewRows.first().locator('.inv-preview-btn').click();
+  await navigationPage.getByRole('button', { name: 'Confirm invoice line and advance; close after the last line' }).waitFor();
+  await navigationPage.locator('#previewReviewBtn').dblclick();
+  assert.equal(await previewRows.first().locator('.inv-review-btn').getAttribute('aria-pressed'), 'true', 'tick must confirm the original line');
+  assert.equal(await navigationPage.locator('#previewOverlay.active').count(), 1, 'tick should keep the next preview open');
+  assert.equal(await navigationPage.locator('#previewFilename').textContent(), secondFilename, 'tick should advance in the same order as ArrowRight');
+  assert.equal(await navigationPage.locator('#previewReviewBtn').getAttribute('aria-pressed'), 'false', 'advancing must not review the next line');
+  await navigationPage.locator('#previewReviewBtn').click();
+  await navigationPage.waitForSelector('#previewOverlay:not(.active)');
+  assert.equal(await previewRows.last().locator('.inv-review-btn').getAttribute('aria-pressed'), 'true', 'last tick should confirm and close without wrapping');
+  await previewRows.last().locator('.inv-preview-btn').click();
+  await navigationPage.locator('#previewReviewBtn').click();
+  await navigationPage.waitForSelector('#previewOverlay:not(.active)');
+  assert.equal(await previewRows.last().locator('.inv-review-btn').getAttribute('aria-pressed'), 'true', 'tick on an already reviewed line must not toggle it off');
+  await navigationPage.waitForFunction(() => document.querySelectorAll('.invoice-section .invoice-push-btn:disabled').length === 0);
+  await navigationPage.reload({ waitUntil: 'networkidle' });
+  assert.equal(await navigationPage.locator('.inv-review-btn[aria-pressed="true"]').count(), 2, 'both confirmations must persist across reload');
   await navigationPage.close();
+
+  const conflictReceipts = [1, 2, 3].map(n => ({
+    key: `conflict-${n}.pdf`, originalName: `Conflict ${n}.pdf`,
+    linkedClaimIds: [`conflict-claim-${n}`], linkedClaimsBackend: 'howmuch',
+    taggedAmount: n * 11, taggedCurrency: 'SGD', taggedGstShown: false,
+  }));
+  let releasePreviewSave;
+  const previewSaveGate = new Promise(resolve => { releasePreviewSave = resolve; });
+  let previewSaveStarted;
+  const previewSaveStart = new Promise(resolve => { previewSaveStarted = resolve; });
+  const conflictPage = await browser.newPage();
+  await conflictPage.addInitScript(() => {
+    localStorage.setItem('claim_manager_auth', 'test');
+    localStorage.setItem('claim_manager_remember', 'true');
+  });
+  await setupMockApi(conflictPage, {
+    receipts: conflictReceipts,
+    todos: [1, 2, 3].map(n => ({ id: `conflict-claim-${n}`, date: `2026-06-2${n}`, description: `Conflict ${n}`, amount: n * 11 })),
+    holdInvoiceSave: async body => {
+      if (body.claimId === 'conflict-claim-1') { previewSaveStarted(); await previewSaveGate; }
+    },
+  });
+  await conflictPage.goto(`http://127.0.0.1:${port}/invoices`, { waitUntil: 'networkidle' });
+  const conflictRows = conflictPage.locator('.invoice-section tr[data-id]');
+  await conflictRows.first().locator('.inv-preview-btn').click();
+  await conflictPage.locator('#previewReviewBtn').click();
+  await previewSaveStart;
+  assert.equal(await conflictPage.locator('#previewFilename').textContent(), 'Conflict 2.pdf');
+  conflictReceipts[0].invoiceEdits = { revision: '100', lines: { 'howmuch::conflict-claim-1': { remark: 'Agent decision' } } };
+  const oldSecondRow = await conflictRows.nth(1).elementHandle();
+  releasePreviewSave();
+  await conflictPage.waitForFunction(row => !row.isConnected, oldSecondRow);
+  assert.equal(await conflictPage.locator('#previewOverlay.active').count(), 0, 'a conflict rebuild must close the preview before its captured row becomes stale');
+  await conflictPage.keyboard.press('ArrowRight');
+  await conflictPage.keyboard.press('Enter');
+  assert.equal(conflictReceipts[0].invoiceEdits.revision, '100', 'conflicted review must not be blindly retried');
+  await conflictRows.nth(1).locator('.inv-preview-btn').click();
+  await conflictPage.locator('#previewReviewBtn').click();
+  assert.equal(await conflictRows.nth(1).locator('.inv-review-btn').getAttribute('aria-pressed'), 'true', 'reopened preview must target the live row');
+  assert.equal(await conflictPage.locator('#previewFilename').textContent(), 'Conflict 3.pdf', 'reopened preview must advance using the rebuilt rows');
+  await conflictPage.keyboard.press('Escape');
+  await conflictPage.close();
 
   const compactPage = await browser.newPage({ viewport: { width: 320, height: 700 } });
   await compactPage.addInitScript(() => {
@@ -1299,6 +1360,7 @@ async function main() {
   await badgePage.keyboard.press('Enter');
   await readyRow.locator('.inv-preview-btn').click();
   await badgePage.locator('#previewReviewBtn').click();
+  await badgePage.keyboard.press('Escape');
   const unreviewedRows = badgePage.locator('.invoice-section .inv-review-btn[aria-pressed="false"]');
   while (await unreviewedRows.count()) await unreviewedRows.first().click();
   const badgePush = badgePage.locator('.invoice-section[data-bucket="nongst"] .invoice-push-btn');

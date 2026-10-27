@@ -98,10 +98,10 @@ export function closePreview() {
 export function initPreview() {
   previewClose.addEventListener('click', closePreview);
   previewBackdrop.addEventListener('click', closePreview);
-  previewReviewBtn.addEventListener('click', () => {
-    if (!previewReviewAction) return;
+  previewReviewBtn.addEventListener('click', (e) => {
+    if (!previewReviewAction || e.detail > 1) return;
     previewReviewAction(true);
-    closePreview();
+    if (!previewNavigateAction?.(1)) closePreview();
   });
   document.addEventListener('keydown', (e) => {
     if (!previewOverlay.classList.contains('active')) return;
