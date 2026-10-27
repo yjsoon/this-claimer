@@ -3017,7 +3017,7 @@ export default {
       // POST /xero/invoices/push - create a DRAFT bill and attempt to attach
       // receipts. YNAB/receipt state is changed only by /mark-claimed.
       if (path === '/xero/invoices/push' && request.method === 'POST') {
-        let unlock: (() => Promise<void>) | undefined;
+        let pushLock: Awaited<ReturnType<typeof lockInvoiceXeroPush>> | undefined;
         let mayHaveBill = false;
         let pushKey = '';
         const selected: Array<{ key: string; ids: string[] }> = [];
@@ -3060,7 +3060,7 @@ export default {
           }
           const idem = await xero.idempotencyKey(['claim-bill', backend, body.bucket || '', body.reference || '', ...lineKeys]);
           pushKey = idem;
-          unlock = await lockInvoiceXeroPush(env.RECEIPTS, idem);
+          pushLock = await lockInvoiceXeroPush(env.RECEIPTS, idem);
 
           // Reserve only the submitted subset. CAS with edit revisions prevents a
           // stale browser or overlapping subset from creating another bill.
@@ -3078,13 +3078,14 @@ export default {
           }
           for (const { key, ids } of selected) {
             const newlyReserved = await updateInvoiceXero(env.RECEIPTS, key, ids,
-              idem, undefined, body.invoiceRevisions?.[key]);
+              idem, undefined, body.invoiceRevisions?.[key], pushLock.owner);
             reserved.push({ key, ids: newlyReserved });
           }
 
           const knownBills = await Promise.all(lineItems.map(async line =>
             (await readInvoiceEdits(env.RECEIPTS, line.receiptKey)).xero?.[xeroLineId(line, backend)]));
           const remembered = knownBills.find(state => state?.invoiceID);
+          await pushLock.startCreating();
           mayHaveBill = true;
           const bill = remembered?.invoiceID ? {
             invoiceID: remembered.invoiceID, invoiceNumber: remembered.invoiceNumber || '', url: '',
@@ -3188,10 +3189,10 @@ export default {
           // Release only new ownership on pre-Xero failure. A definitive
           // validation rejection proves no bill exists, so its whole key can
           // be released. Unknown network/5xx outcomes must remain reserved.
-          if (unlock && (!mayHaveBill || err instanceof xero.XeroBillRejected)) {
+          if (pushLock && (!mayHaveBill || err instanceof xero.XeroBillRejected)) {
             try {
               for (const { key, ids } of err instanceof xero.XeroBillRejected ? selected : reserved) {
-                await releaseInvoiceXero(env.RECEIPTS, key, ids, pushKey);
+                await releaseInvoiceXero(env.RECEIPTS, key, ids, pushKey, pushLock.owner);
               }
             } catch (releaseErr) {
               message += ` ${releaseErr instanceof Error ? releaseErr.message : 'Reservation cleanup failed; reconcile before retrying.'}`;
@@ -3202,7 +3203,12 @@ export default {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         } finally {
-          if (unlock) await unlock();
+          // Cleanup must not replace a successful bill response (or the useful
+          // original failure). An interrupted/failed release recovers by lease.
+          if (pushLock) {
+            try { await pushLock.release(); }
+            catch { console.warn('Xero push lock cleanup failed; the lease will expire within one minute.'); }
+          }
         }
       }
 

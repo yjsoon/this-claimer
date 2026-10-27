@@ -5,7 +5,7 @@ export const INVOICE_EDITS_PREFIX = '__invoice_edits/';
 export interface InvoiceEdits {
   revision: string | null;
   lines: Record<string, Record<string, unknown>>;
-  xero?: Record<string, { pushKey: string; reservedAt?: number; invoiceID?: string; invoiceNumber?: string; claimedAt?: string }>;
+  xero?: Record<string, { pushKey: string; pushOwner?: string; reservedAt?: number; invoiceID?: string; invoiceNumber?: string; claimedAt?: string }>;
 }
 
 export class InvoiceXeroConflict extends Error {}
@@ -30,24 +30,56 @@ async function hydrateInvoiceXero(bucket: R2Bucket, current: InvoiceEdits): Prom
   return current;
 }
 
-// Identical in-flight requests must not share reservations: otherwise one
-// failed acquisition could release ownership while its twin creates the bill.
-export async function lockInvoiceXeroPush(bucket: R2Bucket, pushKey: string): Promise<() => Promise<void>> {
+async function ownedXeroLock(bucket: R2Bucket, pushKey: string, owner: string): Promise<R2ObjectBody> {
+  const object = await bucket.get(`${INVOICE_EDITS_PREFIX}__xero_lock/${pushKey}`);
+  const state = object ? await object.json<{ owner: string; expiresAt: number }>() : null;
+  if (!object || state?.owner !== owner || state.expiresAt <= Date.now()) {
+    throw new InvoiceXeroConflict('This push attempt was superseded. Retry the identical selection and reference.');
+  }
+  return object;
+}
+
+// Lease takeover fences the old owner before Xero. Per-line owner tokens also
+// prevent its delayed cleanup from releasing a successor's adopted reservations.
+export async function lockInvoiceXeroPush(bucket: R2Bucket, pushKey: string) {
   const key = `${INVOICE_EDITS_PREFIX}__xero_lock/${pushKey}`;
-  const locked = await bucket.put(key, 'active', { onlyIf: { etagDoesNotMatch: '*' } });
+  const object = await bucket.get(key);
+  if (object && (await object.json<{ expiresAt: number }>()).expiresAt > Date.now()) {
+    throw new InvoiceXeroConflict('This exact Xero push is already running. Wait up to one minute before retrying.');
+  }
+  const owner = crypto.randomUUID();
+  const value = { owner, expiresAt: Date.now() + 60_000 };
+  const locked = await bucket.put(key, JSON.stringify(value), {
+    onlyIf: object ? { etagMatches: object.etag } : { etagDoesNotMatch: '*' },
+  });
   if (!locked) throw new InvoiceXeroConflict('This exact Xero push is already running. Wait for its result before retrying.');
-  return async () => { await bucket.delete(key); };
+  return {
+    owner,
+    async startCreating() {
+      const current = await ownedXeroLock(bucket, pushKey, owner);
+      if (!await bucket.put(key, JSON.stringify({ ...value, creating: true }), { onlyIf: { etagMatches: current.etag } })) {
+        throw new InvoiceXeroConflict('This push attempt was superseded before Xero. Retry the identical selection and reference.');
+      }
+    },
+    async release() {
+      const current = await bucket.get(key);
+      if (!current || (await current.json<{ owner: string }>()).owner !== owner) return;
+      // Conditional replacement, not unconditional deletion: an old finally
+      // must never unlock a successor. Failed cleanup expires naturally.
+      await bucket.put(key, JSON.stringify({ owner: '', expiresAt: 0 }), { onlyIf: { etagMatches: current.etag } });
+    },
+  };
 }
 
 export async function releaseInvoiceXero(
-  bucket: R2Bucket, key: string, lineIds: string[], pushKey: string,
+  bucket: R2Bucket, key: string, lineIds: string[], pushKey: string, owner: string,
 ): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt++) {
     const object = await bucket.get(INVOICE_EDITS_PREFIX + key);
     if (!object) return;
     const current = await object.json<InvoiceEdits>();
     const states = { ...current.xero };
-    const releasable = lineIds.filter(id => states[id]?.pushKey === pushKey && !states[id]?.invoiceID);
+    const releasable = lineIds.filter(id => states[id]?.pushKey === pushKey && states[id]?.pushOwner === owner && !states[id]?.invoiceID);
     if (!releasable.length) return;
     releasable.forEach(id => { delete states[id]; });
     const written = await bucket.put(INVOICE_EDITS_PREFIX + key, JSON.stringify({
@@ -85,6 +117,7 @@ export async function updateInvoiceXero(
   bucket: R2Bucket, key: string, lineIds: string[], pushKey: string,
   result?: { invoiceID: string; invoiceNumber?: string; claimedAt?: string },
   revision?: string | null,
+  owner?: string,
 ): Promise<string[]> {
   const storageKey = INVOICE_EDITS_PREFIX + key;
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -92,7 +125,9 @@ export async function updateInvoiceXero(
     const current = await hydrateInvoiceXero(bucket, object ? await object.json<InvoiceEdits>() : { revision: null, lines: {} });
     assertInvoiceXero(current, lineIds, pushKey, result, revision);
     const states = { ...current.xero };
-    for (const id of lineIds) states[id] = { reservedAt: Date.now(), ...states[id], pushKey, ...result };
+    for (const id of lineIds) states[id] = { reservedAt: Date.now(), ...states[id], pushKey,
+      ...(owner ? { pushOwner: owner } : {}), ...result };
+    if (owner) await ownedXeroLock(bucket, pushKey, owner);
     const written = await bucket.put(storageKey, JSON.stringify({
       ...current, revision: crypto.randomUUID(), xero: states,
     }), {

@@ -22,10 +22,15 @@ let etag = 0;
 let afterPut = null;
 let failOwnershipKey = '';
 let raceOwnershipKey = '';
+let failLockRelease = false;
 const bucket = {
   async get(key) { const value = objects.get(key); return value ? { ...value, json: async () => JSON.parse(value.body), arrayBuffer: async () => Buffer.from(value.body) } : null; },
   async head(key) { return objects.has(key) ? { customMetadata: {} } : null; },
   async put(key, body, options = {}) {
+    if (failLockRelease && key.startsWith('__invoice_edits/__xero_lock/') && JSON.parse(String(body)).owner === '') {
+      failLockRelease = false;
+      throw new Error('Transient lock release failure');
+    }
     if (key === raceOwnershipKey && Object.values(JSON.parse(String(body)).xero || {}).some(state => state.invoiceID)) {
       raceOwnershipKey = '';
       const current = JSON.parse(objects.get(key).body);
@@ -44,7 +49,13 @@ const bucket = {
     if (afterPut) await afterPut(key, value);
     return value;
   },
-  async delete(key) { objects.delete(key); },
+  async delete(key) {
+    if (failLockRelease && key.startsWith('__invoice_edits/__xero_lock/')) {
+      failLockRelease = false;
+      throw new Error('Transient lock release failure');
+    }
+    objects.delete(key);
+  },
 };
 const bills = new Map();
 const calls = [];
@@ -203,6 +214,55 @@ async function main() {
   assert.equal((await push([c, d], 'Ownership recovery')).data.invoiceID, partialWrite.data.invoiceID);
   assert.equal(calls.length, beforeRecovery, 'partial ownership persistence must not cause another create');
   assert.equal((await api('/xero/invoices/mark-claimed', { invoiceID: partialWrite.data.invoiceID, backend: 'howmuch', lineItems: [d] })).status, 200);
+
+  async function expireLockFor(receiptKey, claimId) {
+    const state = (await api(`/receipt/${receiptKey}/invoice-edits`, undefined, 'GET')).data;
+    const lockKey = `__invoice_edits/__xero_lock/${state.xero[`howmuch::${claimId}`].pushKey}`;
+    const lock = JSON.parse(objects.get(lockKey).body);
+    await bucket.put(lockKey, JSON.stringify({ ...lock, expiresAt: Date.now() - 1 }));
+    return lockKey;
+  }
+  failLockRelease = true;
+  loseBillResponse = true;
+  assert.equal((await push([line('unlock-lost', 14)], 'Unlock lost')).status, 502, 'cleanup must preserve the original unknown-outcome response');
+  const beforeUnlockRecovery = bills.size;
+  assert.equal((await push([line('unlock-lost', 14)], 'Unlock lost')).status, 409, 'a live lease must exclude a twin');
+  await expireLockFor('shared.pdf', 'unlock-lost');
+  assert.equal((await push([line('unlock-lost', 14)], 'Unlock lost')).status, 200, 'failed cleanup must not permanently block exact retry');
+  assert.equal(bills.size, beforeUnlockRecovery);
+  failLockRelease = true;
+  const successfulUnlockFailure = await push([line('unlock-success', 15)], 'Unlock success');
+  assert.equal(successfulUnlockFailure.status, 200, 'cleanup must not overwrite a successful draft result');
+  await expireLockFor('shared.pdf', 'unlock-success');
+  assert.equal((await push([line('unlock-success', 15)], 'Unlock success')).data.invoiceID, successfulUnlockFailure.data.invoiceID);
+
+  await bucket.put('abandoned.pdf', '%PDF-1.4');
+  const abandonedLine = { ...line('abandoned', 16), receiptKey: 'abandoned.pdf' };
+  let releaseOld, oldAcquired, releaseNew, newAcquired;
+  const oldGate = new Promise(resolve => { releaseOld = resolve; });
+  const oldReady = new Promise(resolve => { oldAcquired = resolve; });
+  const newGate = new Promise(resolve => { releaseNew = resolve; });
+  const newReady = new Promise(resolve => { newAcquired = resolve; });
+  afterPut = async key => {
+    if (key === '__invoice_edits/abandoned.pdf') { afterPut = null; oldAcquired(); await oldGate; }
+  };
+  const abandoned = push([abandonedLine], 'Abandoned');
+  await oldReady;
+  const lockKey = await expireLockFor('abandoned.pdf', 'abandoned');
+  afterPut = async key => {
+    if (key === '__invoice_edits/abandoned.pdf') { afterPut = null; newAcquired(); await newGate; }
+  };
+  const successor = push([abandonedLine], 'Abandoned');
+  await newReady;
+  const successorOwner = JSON.parse(objects.get(lockKey).body).owner;
+  releaseOld();
+  assert.equal((await abandoned).status, 409, 'superseded acquisition must be fenced before Xero');
+  assert.equal(JSON.parse(objects.get(lockKey).body).owner, successorOwner, 'old finally must not unlock its successor');
+  assert.equal(JSON.parse(objects.get('__invoice_edits/abandoned.pdf').body).xero['howmuch::abandoned'].pushOwner, successorOwner, 'old cleanup must not erase adopted reservations');
+  const beforeSuccessor = calls.length;
+  releaseNew();
+  assert.equal((await successor).status, 200);
+  assert.equal(calls.length, beforeSuccessor + 1, 'only the surviving owner may start creating');
   console.log('Xero subsets passed (empty, partial, DRAFT/inclusive tax, repeat, overlap/concurrency, subsequent, per-line claimed, reset, stale revision, lost response/expiry, attachments)');
 }
 main().finally(() => fs.rmSync(dir, { recursive: true, force: true })).catch(error => { console.error(error); process.exitCode = 1; });

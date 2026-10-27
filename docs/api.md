@@ -39,8 +39,11 @@ claimed timestamp. Manual PATCH/reset preserves it and cannot modify it. A known
 bill is reused on an exact retry; an unknown result may retry the same payload
 only within five minutes. After that, reconcile against Xero manually. The old
 receipt-wide `xeroPending*` stamps are not authoritative per-line state.
-Identical in-flight requests are serialized so cleanup cannot release another
-attempt's ownership. Pre-Xero acquisition failures release only new reservations;
+Identical in-flight requests use a one-minute owner-fenced lease. After an
+interruption or cleanup failure, wait a minute and retry the identical payload
+within the five-minute safe window. Takeover fences the old acquisition before
+Xero, and its cleanup cannot release a successor's line ownership or lock.
+Pre-Xero acquisition failures release only new reservations;
 an explicit Xero 400 `ValidationException` releases the rejected push's ownership
 so corrected input can be submitted. Network/5xx failures remain fail-closed.
 Successful bills are also saved once per push under the internal sidecar prefix.
