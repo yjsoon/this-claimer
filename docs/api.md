@@ -44,8 +44,11 @@ interruption or cleanup failure, wait a minute and retry the identical payload
 within the five-minute safe window. Takeover fences the old acquisition before
 Xero, and its cleanup cannot release a successor's line ownership or lock.
 Pre-Xero acquisition failures release only new reservations;
-an explicit Xero 400 `ValidationException` releases the rejected push's ownership
-so corrected input can be submitted. Network/5xx failures remain fail-closed.
+an explicit Xero 400 `ValidationException` or HTTP 200 per-invoice rejection
+(`StatusAttributeString: "ERROR"`, `HasErrors: true` or nonempty `ValidationErrors`)
+releases the rejected push's ownership so corrected input can be submitted. An
+ID in a rejected invoice response is not proof it was saved. Network/5xx failures
+remain fail-closed.
 Successful bills are also saved once per push under the internal sidecar prefix.
 Reads recover line ownership from that record if a receipt-state write failed;
 the successful draft is returned with a warning instead of hiding its result.

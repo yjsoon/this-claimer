@@ -369,8 +369,16 @@ export async function createBill(env: XeroEnv, bill: XeroBillInput): Promise<Xer
     if (validationRejected) throw new XeroBillRejected(message);
     throw new Error(message);
   }
-  const data = (await res.json()) as { Invoices?: Array<{ InvoiceID?: string; InvoiceNumber?: string }> };
+  const data = (await res.json()) as { Invoices?: Array<{
+    InvoiceID?: string; InvoiceNumber?: string; StatusAttributeString?: string;
+    HasErrors?: boolean; ValidationErrors?: unknown[];
+  }> };
   const inv = data.Invoices && data.Invoices[0];
+  // summarizeErrors=false reports unsaved invoices inside HTTP 200, and an
+  // ERROR can still contain an InvoiceID. Reject before remembering that ID.
+  if (inv?.StatusAttributeString === 'ERROR' || inv?.HasErrors === true || inv?.ValidationErrors?.length) {
+    throw new XeroBillRejected(`Xero rejected bill validation: ${JSON.stringify(inv.ValidationErrors || []).slice(0, 400)}`);
+  }
   if (!inv || !inv.InvoiceID) throw new Error('Xero did not return an invoice id');
   return {
     invoiceID: inv.InvoiceID,

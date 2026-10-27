@@ -63,6 +63,7 @@ const attachmentCalls = [];
 let loseBillResponse = false;
 let failAttachment = false;
 let rejectNextBill = false;
+let nextInvoiceResponse = null;
 global.fetch = async (url, init) => {
   if (url.startsWith('https://api.xero.com/')) {
     if (url.includes('/Attachments/')) {
@@ -77,6 +78,11 @@ global.fetch = async (url, init) => {
     if (rejectNextBill) {
       rejectNextBill = false;
       return Response.json({ ErrorNumber: 10, Type: 'ValidationException', Message: 'Account is archived' }, { status: 400 });
+    }
+    if (nextInvoiceResponse) {
+      const invoice = nextInvoiceResponse;
+      nextInvoiceResponse = null;
+      return Response.json({ Invoices: [invoice] });
     }
     if (!bills.has(key)) bills.set(key, { InvoiceID: `bill-${bills.size + 1}`, InvoiceNumber: `DRAFT-${bills.size + 1}` });
     if (loseBillResponse) { loseBillResponse = false; throw new Error('Connection lost after creating bill'); }
@@ -174,6 +180,30 @@ async function main() {
   assert.equal((await push([rejectedLine], 'Correctable')).status, 502);
   const corrected = await push([{ ...rejectedLine, accountCode: '463' }], 'Correctable');
   assert.equal(corrected.status, 200, 'definitive validation rejection must permit a corrected retry');
+
+  // summarizeErrors=false reports unsaved invoices inside HTTP 200, sometimes
+  // even with an InvoiceID. None may become pushed ownership or block correction.
+  for (const [id, rejection] of [
+    ['error-with-id', { InvoiceID: 'unsaved-id', StatusAttributeString: 'ERROR', ValidationErrors: [{ Description: 'Account is archived' }] }],
+    ['error-no-id', { StatusAttributeString: 'ERROR', ValidationErrors: [{ Message: 'Account is archived' }] }],
+    ['error-status-only', { InvoiceID: 'unsaved-status-id', StatusAttributeString: 'ERROR' }],
+    ['has-errors', { InvoiceID: 'unsaved-flag-id', HasErrors: true }],
+    ['validation-errors', { InvoiceID: 'unsaved-validation-id', ValidationErrors: [{ Message: 'Account is archived' }] }],
+  ]) {
+    nextInvoiceResponse = rejection;
+    const rejected = line(id, 12.34);
+    const result = await push([rejected], id);
+    assert.equal(result.status, 502, `${id}: HTTP200 per-invoice rejection is not a saved draft`);
+    assert.equal((await edits()).data.xero[`howmuch::${id}`], undefined, `${id}: no rejected bill ownership may remain`);
+    const retry = await push([{ ...rejected, accountCode: '463' }], id);
+    assert.equal(retry.status, 200, `${id}: corrected input must be pushable`);
+    assert.notEqual(retry.data.invoiceID, rejection.InvoiceID);
+    assert.equal((await edits()).data.xero[`howmuch::${id}`].invoiceID, retry.data.invoiceID);
+  }
+  nextInvoiceResponse = { InvoiceID: 'saved-with-warning', StatusAttributeString: 'WARNING', HasErrors: false, ValidationErrors: [], Warnings: [{ Message: 'A non-blocking warning' }] };
+  const warningBill = await push([line('warning', 13.45)], 'Warning');
+  assert.equal(warningBill.status, 200, 'a successfully saved invoice with warnings must remain accepted');
+  assert.equal(warningBill.data.invoiceID, 'saved-with-warning');
 
   await bucket.put('a.pdf', '%PDF-1.4');
   await bucket.put('b.pdf', '%PDF-1.4');
