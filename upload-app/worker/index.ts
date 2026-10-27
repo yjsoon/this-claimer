@@ -150,8 +150,11 @@ interface YnabTransaction {
   account_name: string | null;
   payee_name: string | null;
   memo: string | null;
+  claim_status?: 'to_claim' | 'claimed' | null;
+  claimed_on?: string | null;
   category_name?: string | null;
   transfer_transaction_id: string | null;
+  parent_transaction_id?: string | null;
   subtransactions?: YnabSubtransaction[];
 }
 
@@ -430,12 +433,19 @@ function parseTodoDescription(memo: string | null | undefined): string | null {
   return description || 'Claim';
 }
 
-function toYnabTodoFromTransaction(transaction: YnabTransaction): YnabTodo | null {
-  const description = parseTodoDescription(transaction.memo);
+function toYnabTodoFromTransaction(transaction: YnabTransaction, backend: ClaimsBackend): YnabTodo | null {
+  if (backend === 'howmuch' && transaction.claim_status === 'claimed') return null;
+  const memo = backend === 'howmuch'
+    ? transaction.memo?.replace(/^TOCHECK(?::|\s|$)\s*/i, '')
+    : transaction.memo;
+  const description = backend === 'howmuch' && transaction.claim_status === 'to_claim'
+    ? parseTodoDescription(memo) || memo?.trim() || 'Claim'
+    : parseTodoDescription(memo);
   if (!description) return null;
 
-  // For transfers, only keep the outflow side to avoid duplicate TODOs.
-  if (transaction.transfer_transaction_id && transaction.amount >= 0) {
+  // Ordinary pairs share one claim; HowMuch split-linked sides own theirs.
+  if (transaction.transfer_transaction_id && transaction.amount >= 0
+    && !(backend === 'howmuch' && transaction.parent_transaction_id)) {
     return null;
   }
 
@@ -595,12 +605,14 @@ async function fetchYnabTodos(
 
   transactions.forEach((transaction) => {
     const subtransactionTodos: YnabTodo[] = [];
-    (transaction.subtransactions || []).forEach((subtransaction) => {
+    // HowMuch's stored claim belongs to the parent, not its legacy split memos.
+    const hasStoredClaim = backend === 'howmuch' && transaction.claim_status != null;
+    (hasStoredClaim ? [] : transaction.subtransactions || []).forEach((subtransaction) => {
       const subtransactionTodo = toYnabTodoFromSubtransaction(transaction, subtransaction);
       if (subtransactionTodo) subtransactionTodos.push(subtransactionTodo);
     });
 
-    const todo = toYnabTodoFromTransaction(transaction);
+    const todo = toYnabTodoFromTransaction(transaction, backend);
     if (todo && subtransactionTodos.length === 0) {
       todos.push(todo);
     }
@@ -1923,12 +1935,28 @@ async function markHowMuchClaimed(
 
   for (let offset = 0; offset < pending.length; offset += HOWMUCH_UPDATE_BATCH_SIZE) {
     const batch = pending.slice(offset, offset + HOWMUCH_UPDATE_BATCH_SIZE);
-    const updates = batch.map((claim) => ({
-      id: claim.ynabClaimId,
-      memo: `CLAIMED - ${claimedDate}: ${claim.claimDescription}`,
-    }));
 
     try {
+      const updates = await mapWithConcurrency(batch, 5, async (claim) => {
+        const response = await fetch(`${config.apiUrl}/plans/${encodeURIComponent(config.planId)}/transactions/${encodeURIComponent(claim.ynabClaimId)}`, {
+          headers: { Authorization: `Bearer ${config.token}` },
+        });
+        if (!response.ok) throw new Error(await readYnabError(response));
+        const body = (await response.json()) as { data?: { transaction?: YnabTransaction } };
+        const stored = body.data?.transaction;
+        if (!stored || stored.id !== claim.ynabClaimId) throw new Error('HowMuch did not return the requested transaction.');
+        const update: { id: string; claim_status: string; claimed_on: string; memo?: string } = {
+          id: claim.ynabClaimId, claim_status: 'claimed', claimed_on: claimedDate,
+        };
+        // Field-capable servers need no memo rewrite. This preserves legacy
+        // estimate words and null memos, and respects split-linked ownership.
+        if (stored.claim_status === undefined) {
+          if (stored.memo !== null && typeof stored.memo !== 'string') throw new Error('HowMuch returned an invalid memo.');
+          const memo = (stored.memo || '').replace(/^(\s*(?:TOCHECK(?::|\s)\s*)?)TODO(?::|\s|$)\s*/i, '$1');
+          update.memo = `CLAIMED - ${claimedDate}: ${memo}`.trimEnd();
+        }
+        return update;
+      });
       const response = await fetch(`${config.apiUrl}/plans/${encodeURIComponent(config.planId)}/transactions`, {
         method: 'PATCH',
         headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' },
@@ -1941,16 +1969,20 @@ async function markHowMuchClaimed(
       }
 
       const body = (await response.json()) as {
-        data?: { transactions?: Array<{ id?: string; memo?: string | null }> };
+        data?: { transactions?: Array<Pick<YnabTransaction, 'id' | 'memo' | 'claim_status' | 'claimed_on'>> };
       };
-      const returned = new Map((body.data?.transactions || []).map((transaction) => [transaction.id, transaction.memo]));
+      const returned = new Map((body.data?.transactions || []).map((transaction) => [transaction.id, transaction]));
       batch.forEach((claim, index) => {
         const update = updates[index];
+        const transaction = returned.get(claim.ynabClaimId);
+        const confirmed = transaction && (transaction.claim_status === undefined
+          ? update.memo !== undefined && transaction.memo === update.memo
+          : transaction.claim_status === 'claimed' && transaction.claimed_on === claimedDate);
         results.set(
           claim.ynabClaimId,
-          returned.get(claim.ynabClaimId) === update.memo
+          confirmed
             ? { status: 'claimed' }
-            : { status: 'failed', detail: 'HowMuch did not confirm the requested memo update.' }
+            : { status: 'failed', detail: 'HowMuch did not confirm the requested claim update.' }
         );
       });
       if (batch.some((claim) => results.get(claim.ynabClaimId)?.status === 'failed')) break;
