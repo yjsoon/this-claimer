@@ -298,7 +298,7 @@ async function syncInvoiceEdits() {
       });
       const data = await response.json();
       if (response.ok || response.status === 409) {
-        const shared = { revision: data.revision, lines: data.lines };
+        const shared = { revision: data.revision, lines: data.lines, xero: data.xero };
         sharedInvoiceEdits.set(line.receiptKey, shared);
         const receipt = receiptsData.find(item => item.key === line.receiptKey);
         if (receipt) receipt.invoiceEdits = shared;
@@ -424,8 +424,10 @@ function rememberPushedInvoice(data, payload) {
 }
 
 function rememberedInvoiceIDForItem(item) {
-  // Only a push remembered in this browser counts. Receipt xeroPending*
-  // stamps are leftover portal metadata and are not proof a bill exists.
+  const claimId = item.ynabClaimId || `receipt-ready:${item.receiptKey}`;
+  const state = sharedInvoiceEdits.get(item.receiptKey)?.xero?.[`${item.claimsBackend}::${claimId}`];
+  if (state?.invoiceID) return state.invoiceID;
+  // Legacy receipt-wide xeroPending* stamps are not proof a bill exists.
   const entry = pushHistoryEntryForItem(item);
   return typeof entry?.invoiceID === 'string' ? entry.invoiceID : '';
 }
@@ -632,7 +634,7 @@ function buildInvoiceLines() {
 
   lines.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
   applySavedInvoiceEdits(lines);
-  invoiceLines = lines;
+  invoiceLines = lines.filter(line => !sharedInvoiceEdits.get(line.receiptKey)?.xero?.[sharedLineKey(line)]?.claimedAt);
   updateInvoicesNavBadge();
 }
 
@@ -674,30 +676,33 @@ function isLineReviewed(line) {
 }
 
 function bucketReviewState(bucket) {
-  const pushable = pushableBucketLines(bucket);
+  const pushable = pushableBucketLines(bucket).filter(line => !rememberedInvoiceIDForItem(line));
   const reviewedCount = pushable.filter(isLineReviewed).length;
   return {
     pushable,
     reviewedCount,
-    allReviewed: pushable.length > 0 && reviewedCount === pushable.length,
   };
 }
 
 function invoicePushNote(bucket) {
-  const { pushable, reviewedCount, allReviewed } = bucketReviewState(bucket);
-  if (pushable.length === 0) return '';
-  if (allReviewed) return 'HowMuch/YNAB stay TODO until you mark checked lines claimed.';
-  return `Review every line before pushing (${reviewedCount}/${pushable.length} reviewed).`;
+  const { pushable, reviewedCount } = bucketReviewState(bucket);
+  if (pushable.length === 0) return 'All lines already pushed. Mark checked lines claimed after checking the draft.';
+  if (!reviewedCount) return 'Check at least one line to push a draft. Unchecked lines stay here for later.';
+  const total = pushable.filter(isLineReviewed).reduce((sum, line) => sum + Number(line.amount), 0);
+  return `${reviewedCount}/${pushable.length} lines selected · S$${total.toFixed(2)} will push. ${pushable.length - reviewedCount} unchecked stay for later. Claim memos stay TODO.`;
 }
 
 function invoiceSectionMeta(bucket, lines, total) {
-  const { pushable, reviewedCount } = bucketReviewState(bucket);
+  const { pushable } = bucketReviewState(bucket);
+  const reviewedCount = pushable.filter(isLineReviewed).length;
+  const pushedCount = lines.filter(line => rememberedInvoiceIDForItem(line)).length;
   const amount = `S$${total.toFixed(2)}`;
+  if (pushedCount) return `${lines.length} items · ${amount} · ${pushedCount} pushed · ${reviewedCount}/${pushable.length} remaining reviewed`;
   if (pushable.length === 0) return `${lines.length} items · ${amount}`;
   if (pushable.length === lines.length) {
     return `${pushable.length} bill lines · ${amount} · ${reviewedCount}/${pushable.length} reviewed`;
   }
-  return `${lines.length} items · ${pushable.length} will push · ${amount} · ${reviewedCount}/${pushable.length} reviewed`;
+  return `${lines.length} items · ${pushable.length} eligible · ${amount} · ${reviewedCount}/${pushable.length} reviewed`;
 }
 
 function invoicePeriodLabel(lines) {
@@ -815,6 +820,7 @@ function renderInvoiceLineRow(line, accounts) {
   const section = getLineSection(line);
   const reviewed = isLineReviewed(line);
   const invalidated = line.reviewInvalidated === true;
+  const invoiceID = rememberedInvoiceIDForItem(line);
   const partyLabel = invoicePartyDisplay === 'source' ? 'Source' : 'Destination';
   const party = invoicePartyDisplay === 'source' ? line.sourceAccount : line.payee;
   return `
@@ -831,6 +837,7 @@ function renderInvoiceLineRow(line, accounts) {
             <button type="button" class="inv-unlink-btn" title="Unlink from invoice list" aria-label="Unlink from invoice list">⛔</button>
           </div>
           ${invoiceSourceHtml(line)}
+          ${invoiceID ? `<a class="inv-source-link" href="https://go.xero.com/AccountsPayable/Edit.aspx?InvoiceID=${encodeURIComponent(invoiceID)}" target="_blank" rel="noopener noreferrer">Draft pushed</a>` : ''}
         </div>
       </td>
       <td class="inv-cell-editable inv-cell-date" data-label="Date" data-field="date" data-input="text" title="Tap to edit"><span class="inv-cell-text">${escapeHtml(line.date || '—')}</span></td>
@@ -854,17 +861,17 @@ function renderInvoiceSection(bucket, lines, accounts) {
   const total = lines.reduce((sum, l) => sum + (Number(l.amount) || 0), 0);
   const collapsed = Boolean(loadSectionCollapsedState()[bucket]);
   const rowsHtml = lines.map((line) => renderInvoiceLineRow(line, accounts)).join('');
-  const { pushable, allReviewed } = bucketReviewState(bucket);
-  const checkedCount = pushable.filter(isLineReviewed).length;
-  const noteClass = pushable.length > 0 && !allReviewed ? 'invoice-doc-note invoice-doc-note-warn' : 'invoice-doc-note';
+  const { reviewedCount } = bucketReviewState(bucket);
+  const checkedCount = pushableBucketLines(bucket).filter(line => isLineReviewed(line) && rememberedInvoiceIDForItem(line)).length;
+  const noteClass = !reviewedCount ? 'invoice-doc-note invoice-doc-note-warn' : 'invoice-doc-note';
   const stampKeys = leftoverDraftStampKeys(lines);
   const stampBtn = stampKeys.length
     ? `<button type="button" class="btn-secondary invoice-clear-stamps-btn" data-bucket="${bucket}">Clear stale draft stamps</button>`
     : '';
-  const pushActions = pushable.length > 0
-    ? `<button type="button" class="btn-primary invoice-push-btn" data-bucket="${bucket}" ${allReviewed && !invoicePushInFlight ? '' : 'disabled'}>${invoicePushInFlight ? 'Pushing…' : 'Push to Xero (draft)'}</button>
+  const pushActions = pushableBucketLines(bucket).length > 0
+    ? `<button type="button" class="btn-primary invoice-push-btn" data-bucket="${bucket}" ${reviewedCount && !invoicePushInFlight ? '' : 'disabled'}>${invoicePushInFlight ? 'Pushing…' : `Push checked to Xero (${reviewedCount}) · draft`}</button>
           <button type="button" class="btn-secondary invoice-download-btn" data-bucket="${bucket}">Download receipts PDF</button>
-          <button type="button" class="btn-secondary invoice-claim-checked-btn" data-bucket="${bucket}" ${checkedCount ? '' : 'disabled'}>Mark checked as claimed</button>
+          <button type="button" class="btn-secondary invoice-claim-checked-btn" data-bucket="${bucket}" ${checkedCount ? '' : 'disabled'}>Mark checked pushed lines as claimed</button>
           <span class="${noteClass}">${escapeHtml(invoicePushNote(bucket))}</span>`
     : '';
   const actionsHtml = (pushActions || stampBtn)
@@ -1346,20 +1353,20 @@ function updateSectionHeaders() {
     if (!section) return;
     const lines = sortBucketLines(bucketLines(bucket), bucket);
     const total = lines.reduce((sum, l) => sum + (Number(l.amount) || 0), 0);
-    const { pushable, allReviewed } = bucketReviewState(bucket);
+    const { reviewedCount } = bucketReviewState(bucket);
     const meta = section.querySelector('.invoice-section-meta');
     if (meta) meta.textContent = invoiceSectionMeta(bucket, lines, total);
     const pushBtn = section.querySelector('.invoice-push-btn');
     if (pushBtn) {
-      pushBtn.disabled = invoicePushInFlight || pushable.length === 0 || !allReviewed;
-      pushBtn.textContent = invoicePushInFlight ? 'Pushing…' : 'Push to Xero (draft)';
+      pushBtn.disabled = invoicePushInFlight || reviewedCount === 0;
+      pushBtn.textContent = invoicePushInFlight ? 'Pushing…' : `Push checked to Xero (${reviewedCount}) · draft`;
     }
     const claimBtn = section.querySelector('.invoice-claim-checked-btn');
-    if (claimBtn) claimBtn.disabled = pushable.filter(isLineReviewed).length === 0;
+    if (claimBtn) claimBtn.disabled = !pushableBucketLines(bucket).some(line => isLineReviewed(line) && rememberedInvoiceIDForItem(line));
     const note = section.querySelector('.invoice-doc-note');
     if (note) {
       note.textContent = invoicePushNote(bucket);
-      note.classList.toggle('invoice-doc-note-warn', pushable.length > 0 && !allReviewed);
+      note.classList.toggle('invoice-doc-note-warn', reviewedCount === 0);
     }
     const totalCell = section.querySelector('tfoot tr td.num + td.num strong');
     if (totalCell) totalCell.textContent = `S$${total.toFixed(2)}`;
@@ -2021,7 +2028,7 @@ async function submitClaimed(invoiceID, lineItems) {
   const claimsById = new Map(claimsData.map((claim) => [claim.id, claim]));
   const attributedLineItems = lineItems.map((item) => ({
     ...item,
-    claimsBackend: item.ynabClaimId ? rememberedClaimsBackendForItem(item) : undefined,
+    claimsBackend: item.ynabClaimId ? rememberedClaimsBackendForItem(item) : item.claimsBackend,
     claimDescription: item.ynabClaimId
       ? claimsById.get(item.ynabClaimId)?.description || item.claimDescription
       : undefined,
@@ -2133,7 +2140,8 @@ async function markCheckedClaimed(data, payload, bucket, btn) {
 
 async function markCheckedSectionClaimed(bucket, btn) {
   const payload = checkedCurrentPayload(bucket);
-  await markCheckedLineItemsClaimed(bucket, payload.lineItems, btn, { payload });
+  const lineItems = payload.lineItems.filter(item => rememberedInvoiceIDForItem(item));
+  await markCheckedLineItemsClaimed(bucket, lineItems, btn, { payload });
 }
 
 function bindPushResultActions(bucket, data, payload) {
@@ -2212,6 +2220,7 @@ function invoicePushSummary(bucket, lines) {
   const receiptLabel = receiptCount === 1 ? '1 receipt' : `${receiptCount} receipts`;
   return [
     `${lineLabel} · S$${total.toFixed(2)} → Soon Yin Jie (${BUCKET_LABEL[bucket]})`,
+    `Only checked, not-yet-pushed lines are included. ${bucketReviewState(bucket).pushable.filter(line => !isLineReviewed(line)).length} unchecked lines stay available for later.`,
     `Attempts Xero attachment and prepares a downloadable ${receiptLabel} PDF in this list order; line descriptions include receipt page references.`,
     'TODO memos change in the selected backend only when you click Mark checked as claimed.',
   ].join('\n');
@@ -2232,17 +2241,9 @@ async function pushInvoice(bucket, btn) {
     return;
   }
 
-  const lines = pushableBucketLines(bucket);
+  const lines = bucketReviewState(bucket).pushable.filter(isLineReviewed).map(line => ({ ...line }));
   if (lines.length === 0) {
-    showStatus('error', `No ${BUCKET_LABEL[bucket]} lines with an amount above S$0.00 to push.`);
-    return;
-  }
-  const unreviewed = lines.filter((l) => !isLineReviewed(l));
-  if (unreviewed.length > 0) {
-    showStatus(
-      'error',
-      `Review all ${BUCKET_LABEL[bucket]} lines before pushing (${lines.length - unreviewed.length}/${lines.length} reviewed).`,
-    );
+    showStatus('error', `Check at least one unpushed ${BUCKET_LABEL[bucket]} line to push.`);
     return;
   }
   if (!xeroConnected) {
@@ -2256,6 +2257,7 @@ async function pushInvoice(bucket, btn) {
   if (reference === null) return;
 
   invoicePushInFlight = true;
+  const invoiceRevisions = Object.fromEntries(lines.map(line => [line.receiptKey, sharedInvoiceEdits.get(line.receiptKey)?.revision ?? null]));
   updateSectionHeaders();
   showStatus('uploading', `Creating ${BUCKET_LABEL[bucket]} draft and attaching ${lines.length} receipt(s)...`);
   try {
@@ -2270,6 +2272,7 @@ async function pushInvoice(bucket, btn) {
     const optimisedPdfName = safeReceiptBundleName(pagePlanSeed);
     btn.textContent = 'Pushing…';
     const payload = pushPayloadForLines(bucket, reference, lines, pagePlan.pageRefs);
+    payload.invoiceRevisions = invoiceRevisions;
     try {
       payload.receiptPdf = await receiptPdfUploadPayload(
         compiledReceipts.blob,

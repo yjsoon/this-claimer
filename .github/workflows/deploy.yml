@@ -44,7 +44,9 @@ jobs:
 
       - name: Worker claims smoke test
         working-directory: upload-app
-        run: npm run smoke:worker-claims
+        run: |
+          npm run smoke:worker-claims
+          npm run test:xero
 
       - name: Access verification tests
         working-directory: upload-app

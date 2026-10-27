@@ -757,7 +757,9 @@ function renderLinkedPairs() {
 }
 
 function getActiveReadyClaimIds(receipt) {
-  return receipt.xeroInvoiceId ? [] : getLinkedClaimIds(receipt);
+  if (receipt.xeroInvoiceId) return [];
+  const backend = receiptClaimsBackend(receipt) || 'ynab';
+  return getLinkedClaimIds(receipt).filter(id => !receipt.invoiceEdits?.xero?.[`${backend}::${id}`]?.claimedAt);
 }
 
 // Linking, unlinking, deleting or re-dating a receipt only changes receipt

@@ -44,6 +44,29 @@ checked as claimed** action. That action tags the receipts and flips linked
 `TODO:` memos to `CLAIMED:` in their originating backend; creating the draft
 alone does not change claim memos.
 
+**Push checked to Xero** includes only checked/reviewed lines that have not
+already been pushed. The button and note show the selected count and amount;
+the confirmation totals and receipt PDF use that same subset. Unchecked lines
+stay available for a later draft. Zero checked lines disables Push. Pushed lines
+show a **Draft pushed** link and cannot be added to another draft; mark them
+claimed separately after checking Xero. The section's **Mark checked pushed lines
+as claimed** action ignores checked lines that have not been pushed yet.
+Bill ownership and claimed state are
+shared per line, so claiming one of several lines on a receipt does not hide its
+unchecked siblings. Old receipt-wide pending stamps remain legacy metadata, not
+proof of a pushed bill.
+
+Pushes use version checks and reserve their exact line subset before calling
+Xero. A stale or overlapping push fails rather than duplicating lines. If a push
+has an uncertain outcome, retry the identical subset and reference; do not change
+the selection or reference to work around an error. Exact retries reuse the
+remembered bill (or the same Xero idempotency key while its outcome is unknown).
+Unknown-outcome retries stop after five minutes, before Xero's six-minute key
+expiry; check Xero and reconcile deliberately rather than risking a duplicate.
+If Xero explicitly rejects validation (for example, an archived account), no
+bill was created: correct the line, review it and push again. Failed acquisition
+before contacting Xero releases its new reservations; it does not strand lines.
+
 In an invoice receipt preview, **← / →** move between lines without wrapping,
 **Enter** toggles reviewed/unreviewed without moving, and **Escape** closes.
 Clicking the **tick** confirms the current line and opens the next preview;
