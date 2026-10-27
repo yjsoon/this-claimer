@@ -5,15 +5,19 @@ on:
     branches: [main]
     paths:
       - 'upload-app/**'
+      - 'shared/**'
       - '.github/workflows/deploy.yml'
   pull_request:
     paths:
       - 'upload-app/**'
+      - 'shared/**'
+      - 'scripts/**'
       - '.github/workflows/deploy.yml'
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    # Both locked Playwright versions support this runner's browser libraries.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -46,16 +50,32 @@ jobs:
         working-directory: upload-app
         run: npm run test:access
 
+      - name: Security and Gmail contracts
+        working-directory: upload-app
+        run: |
+          npm run test:security
+          npm run test:gmail
+
+      - name: Offline receipt exporter contracts
+        working-directory: scripts
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npm run test:security
+
       - name: AI settings tests
         working-directory: upload-app
         run: |
           npm run test:ai
           npm run smoke:ai-frontend
 
-      - name: Verify HowMuch secret exists
+      - name: Verify production identity, rollback version, and required secrets
         if: github.event_name == 'push'
         working-directory: upload-app
         run: |
+          npx wrangler whoami
+          npx wrangler deployments list --json \
+            | jq -e 'select(length > 0) | map({id, created_on, versions})'
           npx wrangler secret list --format json \
             | jq -e '([.[].name] | index("HOWMUCH_PAT") != null) and (([.[].name] | index("HOWMUCH_PLAN_ID") != null) or ([.[].name] | index("YNAB_BUDGET_ID") != null))'
         env:

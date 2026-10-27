@@ -76,7 +76,13 @@ export async function openPreview(key, displayName, { amount = 0, onAmountChange
     const response = await fetch(url, { headers: authHeaders() });
     if (!response.ok) throw new Error('Failed to load');
 
-    const blob = await response.blob();
+    let blob = await response.blob();
+    if (isPdf) {
+      // Existing uploads may have untrusted HTTP metadata. Never navigate an
+      // iframe to HTML (including a PDF/HTML polyglot served as text/html).
+      if (await blob.slice(0, 5).text() !== '%PDF-') throw new Error('Invalid PDF');
+      blob = new Blob([blob], { type: 'application/pdf' });
+    }
     if (request !== previewRequest) return;
     const blobUrl = URL.createObjectURL(blob);
 
