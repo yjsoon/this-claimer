@@ -98,8 +98,8 @@ export function closePreview() {
 export function initPreview() {
   previewClose.addEventListener('click', closePreview);
   previewBackdrop.addEventListener('click', closePreview);
-  previewReviewBtn.addEventListener('click', () => {
-    if (!previewReviewAction) return;
+  previewReviewBtn.addEventListener('click', (e) => {
+    if (!previewReviewAction || e.detail > 1) return;
     previewReviewAction(true);
     if (!previewNavigateAction?.(1)) closePreview();
   });

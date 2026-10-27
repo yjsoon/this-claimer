@@ -279,6 +279,7 @@ async function syncInvoiceEdits() {
       // Rebuilding can queue review invalidations or legacy imports. Drain
       // those too before the promise awaited by Refresh/Push settles.
       conflict = false;
+      if (invoicesActive) closePreview();
       closeActiveInvoiceEdit({ commit: false });
       buildInvoiceLines();
       renderInvoiceEditor();
