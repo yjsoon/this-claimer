@@ -1423,6 +1423,18 @@ async function main() {
   assert.deepEqual(subsetBills[0].lineItems.map(item => [item.ynabClaimId, item.amount, item.taxType]), [['subset-a', 10.90, 'INPUTY24']]);
   assert.ok(subsetBills[0].lineItems[0].description.includes('Receipt: p. 1'));
   assert.equal((await require('pdf-lib').PDFDocument.load(Buffer.from(subsetBills[0].receiptPdf.base64, 'base64'))).getPageCount(), 1);
+  await subsetPage.getByRole('button', { name: 'Start new draft', exact: true }).click({ timeout: 3000 });
+  assert.equal(subsetBills.length, 1, 'starting a draft must not send anything');
+  assert.equal(await subsetPage.locator('.inv-review-btn:focus').count(), 1, 'restart must focus a remaining review control');
+  assert.equal(await subsetPage.locator('.invoice-section-status .invoice-push-result').count(), 0);
+  await subsetPage.locator('#invoicePushHistory summary').click();
+  assert.equal(await subsetPage.locator('#invoicePushHistory').getByRole('link', { name: 'subset-bill-1', exact: true }).count(), 1);
+  assert.ok((await subsetPage.locator('#invoicePushHistory').textContent()).includes('1 line · S$10.90'));
+  assert.equal(await subsetPush().isDisabled(), true, 'starting over must not offer the already-pushed selection again');
+  await subsetPage.reload({ waitUntil: 'networkidle' });
+  assert.equal(await subsetPage.locator('.invoice-section-status .invoice-push-result').count(), 0, 'new draft state must survive reload');
+  await subsetPage.locator('#invoicePushHistory summary').click();
+  assert.equal(await subsetPage.locator('#invoicePushHistory').getByRole('link', { name: 'subset-bill-1', exact: true }).count(), 1);
   // A fresh browser has no local push history. Shared ownership must still
   // suppress the first line while keeping its unchecked sibling available.
   await subsetPage.context().close();
@@ -1447,8 +1459,29 @@ async function main() {
   await subsetPage.reload({ waitUntil: 'networkidle' });
   assert.equal(await subsetPush().isDisabled(), true, 'all pushed lines must stay excluded after reload');
   assert.equal(await subsetPage.getByText('Draft pushed', { exact: true }).count(), 3);
+  await subsetPage.getByRole('button', { name: 'Start new draft', exact: true }).click();
+  assert.equal(await subsetPush().isDisabled(), true, 'starting with no remaining lines must not resend old lines');
+  assert.equal(await subsetPage.locator('#invoicesRefreshBtn:focus').count(), 1);
+  assert.equal(subsetBills.length, 2);
+  await subsetPage.locator('#invoicePushHistory summary').click();
+  assert.equal(await subsetPage.locator('#invoicePushHistory').getByRole('link', { name: 'subset-bill-2', exact: true }).count(), 1);
+  subsetState.todos = [];
+  await subsetPage.reload({ waitUntil: 'networkidle' });
+  assert.equal(await subsetPage.locator('.invoice-section').count(), 0);
+  await subsetPage.locator('#invoicePushHistory summary').click();
+  assert.equal(await subsetPage.locator('#invoicePushHistory').getByRole('link', { name: 'subset-bill-2', exact: true }).count(), 1, 'history must survive an empty invoice list');
+  subsetState.todos = [{ id: 'subset-d', date: '2026-10-04', description: 'New workshop', amount: 13.70 }];
+  subsetState.receipts.push({ key: 'new-subset.pdf', linkedClaimIds: ['subset-d'], linkedClaimsBackend: 'howmuch', taggedGstShown: true });
+  await subsetPage.reload({ waitUntil: 'networkidle' });
+  await subsetPage.locator('tr[data-id="howmuch::new-subset.pdf::subset-d"] .inv-review-btn').click();
+  subsetPage.once('dialog', dialog => dialog.accept('New draft after sending'));
+  await subsetPush().click();
+  await subsetPage.waitForFunction(() => document.querySelector('#status').textContent.includes('Created draft bill subset-bill-3'));
+  assert.deepEqual(subsetBills[2].lineItems.map(item => item.ynabClaimId), ['subset-d']);
+  await subsetPage.getByRole('button', { name: 'Start new draft', exact: true }).click();
+  assert.equal(await subsetPage.locator('#invoicePushHistory a').count(), 2, 'starting a later draft must retain both sent records in this browser');
   await subsetPage.context().close();
-  console.log('Invoice subset browser contract passed (zero, partial, payload/tax/PDF, fresh browser, subsequent/all, reload)');
+  console.log('Invoice subset browser contract passed (zero, partial, payload/tax/PDF, fresh browser, subsequent/all, restart without resend, retained history/empty list, reload)');
 
   for (const [selectedBackend, linkedBackend, readyOnly] of [
     ['howmuch', 'howmuch', false],

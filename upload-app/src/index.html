@@ -32,7 +32,7 @@
   </script>
   <link rel="stylesheet" href="/style.css?v=20261015-ai">
   <!-- Preload the module graph so it loads in one round instead of a three-level waterfall -->
-  <link rel="modulepreload" href="/main.js?v=20261025-shared-edits">
+  <link rel="modulepreload" href="/main.js?v=20261027-new-draft">
   <link rel="modulepreload" href="/claims.js?v=20261025-shared-edits">
   <link rel="modulepreload" href="/gmail.js?v=20261015-ai">
   <link rel="modulepreload" href="/ai.js?v=20261015-ai">
@@ -238,6 +238,7 @@
       <p id="invoicesEmpty" class="empty-state" hidden>
         No ready-to-claim items. Mark receipts ready or link them to claims first.
       </p>
+      <div id="invoicePushHistory" hidden></div>
     </div>
   </div>
 
@@ -367,6 +368,6 @@
     <button id="previewNext" class="preview-nav preview-next" type="button" aria-label="Next invoice" title="Next invoice (→)" hidden>›</button>
   </div>
 
-  <script type="module" src="/main.js?v=20261025-shared-edits"></script>
+  <script type="module" src="/main.js?v=20261027-new-draft"></script>
 </body>
 </html>

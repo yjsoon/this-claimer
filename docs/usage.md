@@ -56,6 +56,14 @@ shared per line, so claiming one of several lines on a receipt does not hide its
 unchecked siblings. Old receipt-wide pending stamps remain legacy metadata, not
 proof of a pushed bill.
 
+After a successful push, **Start new draft** dismisses the result and takes you
+to the remaining unpushed lines. It does not send anything, clear bill ownership,
+or mark claims claimed. If none remain, add or link more receipts and refresh.
+**Previous drafts** retains bill links, references, line counts and totals in
+this browser, including when the invoice list is empty. The bills themselves and
+per-line duplicate-send protection remain in Xero and the shared worker state;
+clearing browser storage does not make pushed lines eligible again.
+
 Pushes use version checks and reserve their exact line subset before calling
 Xero. A stale or overlapping push fails rather than duplicating lines. If a push
 has an uncertain outcome, retry the identical subset and reference; do not change
