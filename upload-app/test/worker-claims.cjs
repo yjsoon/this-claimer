@@ -70,16 +70,44 @@ async function main() {
     });
     requests.push({ method: request.method, url: request.url, body });
 
+    if (request.method === 'GET' && request.url.includes('/transactions?')) {
+      const row = (id, memo, extra = {}) => ({
+        id, memo, date: '2026-10-27', amount: -12000,
+        account_name: 'Synthetic account', payee_name: 'Synthetic payee',
+        transfer_transaction_id: null, ...extra,
+      });
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ data: { transactions: [
+        row('field', 'Dinner', { claim_status: 'to_claim' }),
+        row('empty', null, { claim_status: 'to_claim' }),
+        row('legacy', 'TODO: Taxi'),
+        row('confirm-legacy', 'TOCHECK TODO: Hotel', { claim_status: null }),
+        row('claimed', 'TODO: Stale word', { claim_status: 'claimed',
+          subtransactions: [{ id: 'stale-split', memo: 'TODO: Stale split', amount: -12000 }] }),
+        row('ordinary', 'Dinner', { claim_status: null }),
+        row('transfer-in', 'Dinner', { claim_status: 'to_claim', amount: 12000, transfer_transaction_id: 'out' }),
+        row('transfer-out', 'Dinner', { claim_status: 'to_claim', transfer_transaction_id: 'in' }),
+        row('field-split', 'Group dinner', { claim_status: 'to_claim',
+          subtransactions: [{ id: 'split', memo: 'TODO: Old part', amount: -5000 }] }),
+      ] } }));
+      return;
+    }
+
     if (request.method !== 'PATCH' || !request.url.endsWith('/transactions')) {
       response.writeHead(404, { 'Content-Type': 'application/json' });
       response.end(JSON.stringify({ error: { detail: 'Expected collection PATCH' } }));
       return;
     }
 
-    const transactions = body.transactions.map((transaction, index) => ({
-      ...transaction,
-      memo: responseMode === 'mismatch' && index === 1 ? 'TODO: unchanged' : transaction.memo,
-    }));
+    const transactions = body.transactions.map((transaction, index) => {
+      if (responseMode === 'legacy') return { id: transaction.id, memo: transaction.memo };
+      return {
+        ...transaction,
+        memo: transaction.memo.replace(/^CLAIMED - \d{4}-\d{2}-\d{2}: /, ''),
+        claim_status: responseMode === 'mismatch' && index === 1 ? 'to_claim' : transaction.claim_status,
+        claimed_on: responseMode === 'wrong-date' ? '2000-01-01' : transaction.claimed_on,
+      };
+    });
     response.writeHead(200, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify({ data: {
       transaction_ids: transactions.map((transaction) => transaction.id),
@@ -174,6 +202,14 @@ async function main() {
     const bytes = await fetch(`${workerUrl}/receipt/${encodeURIComponent(uploaded.key)}`, { headers }).then(r => r.text());
     assert.equal(bytes, '%PDF-1.4\ninvoice fixture');
     console.log('Invoice override API passed (CAS, concurrent writers, backend isolation, reset, listing, receipt preservation)');
+
+    const todos = await fetch(`${workerUrl}/ynab/todos`, { headers }).then(r => r.json());
+    assert.deepEqual(todos.todos.map(todo => todo.id).sort(),
+      ['confirm-legacy', 'empty', 'field', 'field-split', 'legacy', 'transfer-out']);
+    assert.equal(todos.todos.find(todo => todo.id === 'field').description, 'Dinner');
+    assert.equal(todos.todos.find(todo => todo.id === 'empty').description, 'Claim');
+    assert.equal(todos.todos.find(todo => todo.id === 'confirm-legacy').description, 'Hotel');
+    requests.length = 0;
     const lines = [lineItem('claim-1', 'First claim'), lineItem('claim-2', 'Second claim')];
     const success = await markClaimed(workerUrl, lines);
     assert.equal(success.response.status, 200, JSON.stringify(success.body));
@@ -181,14 +217,23 @@ async function main() {
     assert.equal(requests[0].method, 'PATCH');
     assert.deepEqual(requests[0].body, {
       transactions: [
-        { id: 'claim-1', memo: `CLAIMED - ${claimedDate}: First claim` },
-        { id: 'claim-2', memo: `CLAIMED - ${claimedDate}: Second claim` },
+        { id: 'claim-1', memo: `CLAIMED - ${claimedDate}: First claim`, claim_status: 'claimed', claimed_on: claimedDate },
+        { id: 'claim-2', memo: `CLAIMED - ${claimedDate}: Second claim`, claim_status: 'claimed', claimed_on: claimedDate },
       ],
     });
     assert.deepEqual(success.body.claimedYnab, [
       { id: 'claim-1', status: 'claimed' },
       { id: 'claim-2', status: 'claimed' },
     ]);
+
+    responseMode = 'legacy';
+    const legacy = await markClaimed(workerUrl, lines);
+    assert.equal(legacy.response.status, 200, JSON.stringify(legacy.body));
+
+    responseMode = 'wrong-date';
+    const wrongDate = await markClaimed(workerUrl, lines);
+    assert.equal(wrongDate.response.status, 502);
+    assert.deepEqual(wrongDate.body.taggedReceipts, []);
 
     requests.length = 0;
     responseMode = 'mismatch';
