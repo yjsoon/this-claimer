@@ -1283,7 +1283,7 @@ async function unlinkInvoiceLine(line, btn) {
     btn.textContent = '…';
   }
   try {
-    const res = await fetch(`${API_BASE}/receipt/${encodeURIComponent(line.receiptKey)}/link`, {
+    const res = await fetch(`${API_BASE}/receipt/${encodeURIComponent(line.receiptKey)}/link?backend=${encodeURIComponent(line.claimsBackend)}`, {
       method: 'DELETE',
       headers: authHeaders(),
     });
