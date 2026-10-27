@@ -339,6 +339,7 @@
   <!-- Receipt Preview Modal -->
   <div id="previewOverlay" class="preview-overlay">
     <div class="preview-backdrop"></div>
+    <button id="previewPrevious" class="preview-nav preview-previous" type="button" aria-label="Previous invoice" title="Previous invoice (←)" hidden>‹</button>
     <div class="preview-container">
       <div class="preview-header">
         <span id="previewFilename" class="preview-filename"></span>
@@ -356,10 +357,14 @@
         <iframe id="previewPdf" class="preview-pdf" title="Receipt PDF preview"></iframe>
       </div>
       <div id="previewReview" class="preview-review" hidden>
-        <span>Registered amount: <strong id="previewAmount"></strong></span>
+        <label class="preview-amount-editor">
+          Registered amount:
+          <span>S$ <input id="previewAmountInput" class="inv-edit-input" type="number" min="0" step="0.01" required aria-label="Registered amount (SGD)"></span>
+        </label>
         <button id="previewReviewBtn" class="preview-review-btn" type="button" aria-label="Confirm invoice line and advance; close after the last line">✓</button>
       </div>
     </div>
+    <button id="previewNext" class="preview-nav preview-next" type="button" aria-label="Next invoice" title="Next invoice (→)" hidden>›</button>
   </div>
 
   <script type="module" src="/main.js?v=20261025-shared-edits"></script>
