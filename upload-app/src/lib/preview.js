@@ -9,12 +9,28 @@ const previewImage = document.getElementById('previewImage');
 const previewPdf = document.getElementById('previewPdf');
 const previewSpinner = document.getElementById('previewSpinner');
 const previewReview = document.getElementById('previewReview');
-const previewAmount = document.getElementById('previewAmount');
 const previewReviewBtn = document.getElementById('previewReviewBtn');
+const previewPrevious = document.getElementById('previewPrevious');
+const previewNext = document.getElementById('previewNext');
+const previewAmountInput = document.getElementById('previewAmountInput');
 let previewReviewAction = null;
 let previewNavigateAction = null;
+let previewAmountAction = null;
+let previewAmountValue = 0;
 let previewReviewed = false;
 let previewRequest = 0;
+
+function commitPreviewAmount() {
+  if (!previewAmountAction) return true;
+  if (!previewAmountInput.reportValidity()) return false;
+  const amount = previewAmountInput.valueAsNumber;
+  if (amount !== previewAmountValue) {
+    previewAmountAction(amount);
+    previewAmountValue = amount;
+  }
+  previewAmountInput.value = previewAmountValue.toFixed(2);
+  return true;
+}
 
 function updatePreviewReview(reviewed) {
   previewReviewed = reviewed;
@@ -31,15 +47,21 @@ function clearPreviewMedia() {
   }
 }
 
-export async function openPreview(key, displayName, { amount = '', reviewed = false, onReview = null, onNavigate = null } = {}) {
+export async function openPreview(key, displayName, { amount = 0, onAmountChange = null, reviewed = false, onReview = null, onNavigate = null, hasPrevious = false, hasNext = false } = {}) {
   const request = ++previewRequest;
   clearPreviewMedia();
   previewFilename.textContent = displayName;
   previewSpinner.classList.add('loading');
   previewReviewAction = typeof onReview === 'function' ? onReview : null;
   previewNavigateAction = typeof onNavigate === 'function' ? onNavigate : null;
+  previewPrevious.hidden = previewNext.hidden = !previewNavigateAction;
+  previewPrevious.disabled = !hasPrevious;
+  previewNext.disabled = !hasNext;
+  previewOverlay.classList.toggle('has-navigation', Boolean(previewNavigateAction));
+  previewAmountAction = typeof onAmountChange === 'function' ? onAmountChange : null;
+  previewAmountValue = amount;
+  previewAmountInput.value = amount.toFixed(2);
   updatePreviewReview(reviewed);
-  previewAmount.textContent = amount;
   previewReview.hidden = !previewReviewAction;
   previewOverlay.classList.toggle('has-review-action', Boolean(previewReviewAction));
   previewOverlay.classList.add('active');
@@ -89,6 +111,7 @@ export function closePreview() {
   document.body.style.overflow = '';
   previewReviewAction = null;
   previewNavigateAction = null;
+  previewAmountAction = null;
   previewReview.hidden = true;
   setTimeout(() => {
     if (request === previewRequest) clearPreviewMedia();
@@ -98,8 +121,22 @@ export function closePreview() {
 export function initPreview() {
   previewClose.addEventListener('click', closePreview);
   previewBackdrop.addEventListener('click', closePreview);
+  for (const [button, direction] of [[previewPrevious, -1], [previewNext, 1]]) {
+    button.addEventListener('click', (e) => {
+      if (e.detail > 1 || !commitPreviewAmount()) return;
+      previewNavigateAction?.(direction);
+    });
+  }
+  previewAmountInput.addEventListener('change', commitPreviewAmount);
+  previewAmountInput.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === 'Escape') previewAmountInput.value = previewAmountValue.toFixed(2);
+    if (e.key === 'Escape' || commitPreviewAmount()) previewClose.focus({ preventScroll: true });
+  });
   previewReviewBtn.addEventListener('click', (e) => {
-    if (!previewReviewAction || e.detail > 1) return;
+    if (!previewReviewAction || e.detail > 1 || !commitPreviewAmount()) return;
     previewReviewAction(true);
     if (!previewNavigateAction?.(1)) closePreview();
   });
@@ -111,14 +148,15 @@ export function initPreview() {
     }
     if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.isComposing) return;
     if (e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
+    if (e.key === 'Enter' && e.target.closest('.preview-nav')) return;
     if (e.key === 'Enter' && previewReviewAction) {
       e.preventDefault();
-      if (e.repeat) return;
+      if (e.repeat || !commitPreviewAmount()) return;
       previewReviewAction(!previewReviewed);
       updatePreviewReview(!previewReviewed);
     } else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && previewNavigateAction) {
       e.preventDefault();
-      previewNavigateAction(e.key === 'ArrowLeft' ? -1 : 1);
+      if (commitPreviewAmount()) previewNavigateAction(e.key === 'ArrowLeft' ? -1 : 1);
     }
   });
 }

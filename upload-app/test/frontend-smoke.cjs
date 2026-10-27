@@ -599,7 +599,7 @@ async function main() {
   await amountCell.locator('input').fill('23.67');
   await rowActions.locator('.inv-preview-btn').click();
   await page.waitForSelector('#previewOverlay.active');
-  assert.equal(await page.locator('#previewAmount').textContent(), 'S$23.67', 'preview should commit and show the active amount edit');
+  assert.equal(await page.locator('#previewAmountInput').inputValue(), '23.67', 'preview should commit and show the active amount edit');
   await page.locator('#previewReviewBtn').click();
   await page.waitForSelector('#previewOverlay:not(.active)');
   const disabledAfter = await page.locator('.invoice-section[data-bucket="nongst"] .invoice-push-btn').isDisabled();
@@ -929,7 +929,15 @@ async function main() {
   assert.equal(await previewRows.count(), 2);
   await previewRows.first().locator('.inv-preview-btn').click();
   await navigationPage.waitForFunction(() => document.querySelector('#previewPdf').src.startsWith('blob:'));
+  await navigationPage.getByRole('button', { name: 'Previous invoice', exact: true }).waitFor();
+  assert.equal(await navigationPage.getByRole('button', { name: 'Previous invoice', exact: true }).isDisabled(), true);
+  assert.equal(await navigationPage.getByRole('button', { name: 'Next invoice', exact: true }).isEnabled(), true);
   const firstFilename = await navigationPage.locator('#previewFilename').textContent();
+  await navigationPage.getByRole('button', { name: 'Next invoice', exact: true }).press('Enter');
+  assert.notEqual(await navigationPage.locator('#previewFilename').textContent(), firstFilename, 'Enter on a focused navigation button must navigate, not confirm');
+  assert.equal(await previewRows.first().locator('.inv-review-btn').getAttribute('aria-pressed'), 'false');
+  await navigationPage.getByRole('button', { name: 'Previous invoice', exact: true }).press('Space');
+  assert.equal(await navigationPage.locator('#previewFilename').textContent(), firstFilename);
   await navigationPage.keyboard.press('ArrowLeft');
   assert.equal(await navigationPage.locator('#previewFilename').textContent(), firstFilename, 'left at the first line should stop');
   await navigationPage.keyboard.press('Enter');
@@ -971,6 +979,36 @@ async function main() {
   await navigationPage.waitForFunction(() => document.querySelectorAll('.invoice-section .invoice-push-btn:disabled').length === 0);
   await navigationPage.reload({ waitUntil: 'networkidle' });
   assert.equal(await navigationPage.locator('.inv-review-btn[aria-pressed="true"]').count(), 2, 'both confirmations must persist across reload');
+
+  await previewRows.first().locator('.inv-preview-btn').click();
+  const previewAmountInput = navigationPage.getByRole('spinbutton', { name: 'Registered amount (SGD)' });
+  await previewAmountInput.fill('19.87');
+  await previewAmountInput.press('Enter');
+  assert.equal(await navigationPage.locator('#previewOverlay.active').count(), 1, 'saving amount with Enter must not confirm or advance');
+  assert.equal(await previewRows.first().locator('[data-field="amount"]').innerText(), 'S$19.87');
+  assert.equal(await previewRows.first().locator('.inv-review-btn').getAttribute('aria-pressed'), 'true', 'manual preview edits must preserve reviewed snapshots just like table edits');
+  await previewAmountInput.fill('-1');
+  await navigationPage.getByRole('button', { name: 'Next invoice', exact: true }).click();
+  assert.equal(await navigationPage.locator('#previewFilename').textContent(), firstFilename, 'invalid amounts must not save or navigate');
+  await previewAmountInput.press('Escape');
+  assert.equal(await previewAmountInput.inputValue(), '19.87', 'Escape cancels the unsaved amount without closing');
+  await previewAmountInput.fill('20.96');
+  await navigationPage.getByRole('button', { name: 'Next invoice', exact: true }).click();
+  assert.equal(await navigationPage.locator('#previewFilename').textContent(), secondFilename);
+  assert.equal(await previewRows.first().locator('[data-field="amount"]').innerText(), 'S$20.96', 'navigation must save the outgoing line');
+  assert.equal(await previewAmountInput.inputValue(), '16.00', 'the next invoice must show its own registered amount');
+  assert.equal(await navigationPage.getByRole('button', { name: 'Next invoice', exact: true }).isDisabled(), true);
+  await previewAmountInput.fill('27.43');
+  await navigationPage.getByRole('button', { name: 'Previous invoice', exact: true }).click();
+  assert.equal(await previewAmountInput.inputValue(), '20.96');
+  await previewAmountInput.fill('999');
+  await previewAmountInput.press('Escape');
+  await navigationPage.keyboard.press('Escape');
+  await navigationPage.waitForLoadState('networkidle');
+  await navigationPage.reload({ waitUntil: 'networkidle' });
+  assert.equal(await previewRows.first().locator('[data-field="amount"]').innerText(), 'S$20.96');
+  assert.equal(await previewRows.last().locator('[data-field="amount"]').innerText(), 'S$27.43', 'preview edits must persist to their own lines');
+  assert.equal(await navigationPage.locator('.inv-review-btn[aria-pressed="true"]').count(), 2);
   await navigationPage.close();
 
   const conflictReceipts = [1, 2, 3].map(n => ({
