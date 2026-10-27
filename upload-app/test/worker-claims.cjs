@@ -87,9 +87,22 @@ async function main() {
         row('ordinary', 'Dinner', { claim_status: null }),
         row('transfer-in', 'Dinner', { claim_status: 'to_claim', amount: 12000, transfer_transaction_id: 'out' }),
         row('transfer-out', 'Dinner', { claim_status: 'to_claim', transfer_transaction_id: 'in' }),
+        row('split-in', 'Independent claim', { claim_status: 'to_claim', amount: 20000,
+          transfer_transaction_id: 'split-parent', parent_transaction_id: 'split-parent' }),
         row('field-split', 'Group dinner', { claim_status: 'to_claim',
           subtransactions: [{ id: 'split', memo: 'TODO: Old part', amount: -5000 }] }),
       ] } }));
+      return;
+    }
+
+    if (request.method === 'GET' && request.url.includes('/transactions/')) {
+      const id = decodeURIComponent(request.url.split('/').pop());
+      response.writeHead(responseMode === 'read-error' ? 503 : 200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ data: { transaction: responseMode === 'missing-source' ? undefined : {
+        id: responseMode === 'wrong-source' ? 'other' : id,
+        memo: id === 'claim-1' ? 'TOCHECK TODO: First claim' : null,
+        ...(responseMode === 'legacy' ? {} : { claim_status: 'to_claim' }),
+      } } }));
       return;
     }
 
@@ -103,7 +116,7 @@ async function main() {
       if (responseMode === 'legacy') return { id: transaction.id, memo: transaction.memo };
       return {
         ...transaction,
-        memo: transaction.memo.replace(/^CLAIMED - \d{4}-\d{2}-\d{2}: /, ''),
+        memo: transaction.memo?.replace(/^(?:CLAIMED - \d{4}-\d{2}-\d{2}: |TOCHECK TODO: )/, '') ?? null,
         claim_status: responseMode === 'mismatch' && index === 1 ? 'to_claim' : transaction.claim_status,
         claimed_on: responseMode === 'wrong-date' ? '2000-01-01' : transaction.claimed_on,
       };
@@ -205,7 +218,7 @@ async function main() {
 
     const todos = await fetch(`${workerUrl}/ynab/todos`, { headers }).then(r => r.json());
     assert.deepEqual(todos.todos.map(todo => todo.id).sort(),
-      ['confirm-legacy', 'empty', 'field', 'field-split', 'legacy', 'transfer-out']);
+      ['confirm-legacy', 'empty', 'field', 'field-split', 'legacy', 'split-in', 'transfer-out']);
     assert.equal(todos.todos.find(todo => todo.id === 'field').description, 'Dinner');
     assert.equal(todos.todos.find(todo => todo.id === 'empty').description, 'Claim');
     assert.equal(todos.todos.find(todo => todo.id === 'confirm-legacy').description, 'Hotel');
@@ -213,12 +226,12 @@ async function main() {
     const lines = [lineItem('claim-1', 'First claim'), lineItem('claim-2', 'Second claim')];
     const success = await markClaimed(workerUrl, lines);
     assert.equal(success.response.status, 200, JSON.stringify(success.body));
-    assert.equal(requests.length, 1, 'HowMuch claims should use one upstream request');
-    assert.equal(requests[0].method, 'PATCH');
-    assert.deepEqual(requests[0].body, {
+    const writes = requests.filter(request => request.method === 'PATCH');
+    assert.equal(writes.length, 1, 'HowMuch claim updates remain batched');
+    assert.deepEqual(writes[0].body, {
       transactions: [
-        { id: 'claim-1', memo: `CLAIMED - ${claimedDate}: First claim`, claim_status: 'claimed', claimed_on: claimedDate },
-        { id: 'claim-2', memo: `CLAIMED - ${claimedDate}: Second claim`, claim_status: 'claimed', claimed_on: claimedDate },
+        { id: 'claim-1', claim_status: 'claimed', claimed_on: claimedDate },
+        { id: 'claim-2', claim_status: 'claimed', claimed_on: claimedDate },
       ],
     });
     assert.deepEqual(success.body.claimedYnab, [
@@ -229,6 +242,17 @@ async function main() {
     responseMode = 'legacy';
     const legacy = await markClaimed(workerUrl, lines);
     assert.equal(legacy.response.status, 200, JSON.stringify(legacy.body));
+    assert.equal(requests.filter(request => request.method === 'PATCH').at(-1).body.transactions[0].memo,
+      `CLAIMED - ${claimedDate}: TOCHECK First claim`, 'old servers retain the estimate marker in the compatibility memo');
+
+    for (const mode of ['read-error', 'missing-source', 'wrong-source']) {
+      responseMode = mode;
+      requests.length = 0;
+      const refused = await markClaimed(workerUrl, lines);
+      assert.equal(refused.response.status, 502, mode);
+      assert.deepEqual(refused.body.taggedReceipts, [], mode);
+      assert.ok(!requests.some(request => request.method === 'PATCH'), mode);
+    }
 
     responseMode = 'wrong-date';
     const wrongDate = await markClaimed(workerUrl, lines);

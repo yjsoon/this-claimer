@@ -89,6 +89,10 @@ global.fetch = async (url, init) => {
     return Response.json({ Invoices: [bills.get(key)] });
   }
   assert.ok(url.includes('/transactions'), `unexpected claims URL ${url}`);
+  if (!init.method || init.method === 'GET') {
+    const id = decodeURIComponent(url.split('/').pop());
+    return Response.json({ data: { transaction: { id, memo: id, claim_status: 'to_claim' } } });
+  }
   const { transactions } = JSON.parse(init.body);
   return Response.json({ data: { transactions, transaction_ids: transactions.map(t => t.id) } });
 };
