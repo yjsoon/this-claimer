@@ -12,6 +12,7 @@
     "test:gmail": "node test/gmail-scan.cjs",
     "test:ai": "node test/ai-settings.cjs",
     "test:access": "node test/access.cjs",
+    "test:security": "node test/security.cjs",
     "smoke:ai-frontend": "node test/ai-frontend.cjs"
   },
   "devDependencies": {

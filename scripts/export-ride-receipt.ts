@@ -1,8 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
+import { htmlToText, MAX_RECEIPT_HTML } from '../shared/receipt-html';
 
 type Provider = 'grab' | 'gojek';
 
@@ -220,7 +222,9 @@ function addExportedLabel(account: string, threadId: string): void {
 function findHtmlPart(part?: GmailPart): string | null {
   if (!part) return null;
   if (part.mimeType === 'text/html' && part.body?.data) {
-    return decodeBase64Url(part.body.data);
+    if (part.body.data.length > Math.ceil(MAX_RECEIPT_HTML / 3) * 4) return null;
+    const html = decodeBase64Url(part.body.data);
+    return html.length <= MAX_RECEIPT_HTML ? html : null;
   }
   for (const child of part.parts ?? []) {
     const html = findHtmlPart(child);
@@ -232,23 +236,6 @@ function findHtmlPart(part?: GmailPart): string | null {
 function decodeBase64Url(data: string): string {
   const padded = data + '='.repeat((4 - (data.length % 4)) % 4);
   return Buffer.from(padded, 'base64url').toString('utf8');
-}
-
-function htmlToText(html: string): string {
-  return html
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(div|p|td|tr|table|h1|h2|h3)>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&#36;/g, '$')
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
-    .replace(/\s+/g, ' ')
-    .trim();
 }
 
 function isGrabRideReceipt(text: string): boolean {
@@ -319,12 +306,18 @@ function findLatestExportedReceiptTimestamp(opts: Options, provider: ProviderCon
   return latest;
 }
 
-async function renderPdf(htmlPath: string, pdfPath: string) {
+export async function renderPdf(htmlPath: string, pdfPath: string) {
   mkdirSync(dirname(pdfPath), { recursive: true });
   const browser = await chromium.launch({ headless: true });
   try {
-    const page = await browser.newPage({ viewport: { width: 900, height: 1200 }, deviceScaleFactor: 1 });
-    await page.goto(`file://${htmlPath}`, { waitUntil: 'networkidle', timeout: 30000 });
+    const context = await browser.newContext({
+      viewport: { width: 900, height: 1200 }, deviceScaleFactor: 1,
+      javaScriptEnabled: false, serviceWorkers: 'block',
+    });
+    await context.route('**/*', route => route.abort());
+    const page = await context.newPage();
+    // No file:// origin or remote assets; inline/data images still render.
+    await page.setContent(readFileSync(htmlPath, 'utf8'), { waitUntil: 'load', timeout: 30000 });
     await page.pdf({
       path: pdfPath,
       format: 'A4',
@@ -443,7 +436,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : error);
+    process.exit(1);
+  });
+}

@@ -7,6 +7,11 @@ import * as ai from './ai';
 import { verifyAccess, safeEqual } from './access';
 import { PDFDocument } from 'pdf-lib';
 import { INVOICE_EDITS_PREFIX, listInvoiceEditKeys, readInvoiceEdits, invoiceEditsResponse, assertInvoiceXero, lockInvoiceXeroPush, releaseInvoiceXero, rememberInvoiceXeroBill, updateInvoiceXero, InvoiceXeroConflict, type InvoiceEdits } from './invoice-edits';
+import { OAUTH_PREFIX, beginOAuth, consumeOAuth } from './oauth-state';
+
+function isInternalKey(key: string): boolean {
+  return key.startsWith(INVOICE_EDITS_PREFIX) || key.startsWith(OAUTH_PREFIX);
+}
 
 const assetManifest = JSON.parse(manifestJSON);
 
@@ -55,10 +60,16 @@ const MAGIC_BYTES: Record<string, { offset: number; bytes: number[] }> = {
 // Validate file magic bytes
 function validateMagicBytes(buffer: ArrayBuffer, mimeType: string): boolean {
   const sig = MAGIC_BYTES[mimeType];
-  if (!sig) return true; // No signature defined, skip check
+  if (!sig) return false;
 
   const bytes = new Uint8Array(buffer.slice(0, 12));
-  return sig.bytes.every((b, i) => bytes[sig.offset + i] === b);
+  if (!sig.bytes.every((b, i) => bytes[sig.offset + i] === b)) return false;
+  const brand = String.fromCharCode(...bytes.slice(8, 12));
+  if (mimeType === 'image/webp') return brand === 'WEBP';
+  if (mimeType === 'image/heic' || mimeType === 'image/heif') {
+    return ['heic', 'heix', 'hevc', 'hevx', 'mif1', 'msf1'].includes(brand);
+  }
+  return true;
 }
 
 // Validate file extension
@@ -622,7 +633,7 @@ async function listReceiptSummaries(
   let headFallbacks = 0;
 
   const receipts = await mapWithConcurrency(
-    listed.objects.filter(obj => !obj.key.startsWith(INVOICE_EDITS_PREFIX)),
+    listed.objects.filter(obj => !isInternalKey(obj.key)),
     RECEIPT_METADATA_CONCURRENCY,
     async (obj): Promise<ReceiptSummary> => {
       // Fall back to head() only if the runtime ignored `include`.
@@ -1238,7 +1249,7 @@ async function tagPendingGst(env: Env, limit: number): Promise<{
   let remaining = 0;
 
   for (const object of listed.objects) {
-    if (object.key.startsWith(INVOICE_EDITS_PREFIX)) continue;
+    if (isInternalKey(object.key)) continue;
     const head = await env.RECEIPTS.head(object.key);
     const metadata = head?.customMetadata || {};
     if (metadata.xeroInvoiceId) continue;
@@ -1404,7 +1415,7 @@ async function tagPendingReceipts(env: Env, limit: number): Promise<{
   const candidateKeys: string[] = [];
 
   for (const object of listed.objects) {
-    if (object.key.startsWith(INVOICE_EDITS_PREFIX)) continue;
+    if (isInternalKey(object.key)) continue;
     const head = await env.RECEIPTS.head(object.key);
     const metadata = head?.customMetadata || {};
     const linkedClaimIds = parseLinkedClaimIds(metadata.linkedClaimIds, metadata.linkedClaimId);
@@ -2123,7 +2134,7 @@ export default {
     }
 
     // Check auth for API routes. /xero/* and /gmail/* are gated too, EXCEPT their /callback,
-    // which Xero itself calls and which is trusted via its one-time state cookie.
+    // which require a server-issued, atomically consumed OAuth transaction.
     // (/xero/connect is a header-authed POST so the auth token never lands in a URL.)
     const isApiRoute =
       ['/upload', '/list', '/receipt/', '/ynab/', '/amount-tags/', '/gst-tags/', '/agent/', '/ai/'].some(
@@ -2156,7 +2167,7 @@ export default {
     try {
       // API routes
       // Sidecars are internal records, never receipt downloads or tag targets.
-      if (path.startsWith('/receipt/') && decodeURIComponent(path.slice('/receipt/'.length)).startsWith(INVOICE_EDITS_PREFIX)) {
+      if (path.startsWith('/receipt/') && isInternalKey(decodeURIComponent(path.slice('/receipt/'.length)))) {
         return Response.json({ error: 'Receipt not found' }, { status: 404, headers: corsHeaders });
       }
       if (path.startsWith('/receipt/') && path.endsWith('/invoice-edits')
@@ -2204,9 +2215,13 @@ export default {
         const key = generateKey(storageFilename);
         const arrayBuffer = await file.arrayBuffer();
 
-        // Validate magic bytes match claimed type
-        const mimeType = normaliseMimeType(file.type);
-        if (!validateMagicBytes(arrayBuffer, mimeType)) {
+        // Store a canonical supported MIME, never a caller-supplied active type.
+        // Empty/octet-stream MIME is common on mobile; still validate by extension.
+        const mimeType = EXT_MIME[ext];
+        const suppliedMime = normaliseMimeType(file.type);
+        const suppliedExt = ALLOWED_MIME_EXTENSIONS[suppliedMime];
+        if ((suppliedMime && suppliedMime !== 'application/octet-stream' && EXT_MIME[suppliedExt] !== mimeType)
+          || !validateMagicBytes(arrayBuffer, mimeType)) {
           return new Response(
             JSON.stringify({ error: 'File content does not match declared type' }),
             { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -2659,7 +2674,7 @@ export default {
             503
           );
         }
-        const state = crypto.randomUUID();
+        const state = await beginOAuth(env.RECEIPTS, 'gmail', url.origin);
         const secure = url.protocol === 'https:' ? '; Secure' : '';
         return new Response(JSON.stringify({ authorizeUrl: await gmail.buildAuthorizeUrl(env, request.url, state) }), {
           headers: {
@@ -2693,7 +2708,8 @@ export default {
         const code = url.searchParams.get('code');
         const state = url.searchParams.get('state');
         const cookieState = parseCookie(request.headers.get('Cookie'), 'gmail_oauth_state');
-        if (!code || !state || !cookieState || state !== cookieState) {
+        if (!code || !state || !cookieState
+          || !(await consumeOAuth(env.RECEIPTS, 'gmail', url.origin, state, cookieState))) {
           return backToApp('gmailError=expired');
         }
         let email: string;
@@ -2799,9 +2815,8 @@ export default {
 
       // POST /xero/connect - begin the OAuth flow. Header-authed (X-Auth-Token,
       // via the API-route gate); returns the authorize URL for the SPA to
-      // navigate to. The CSRF state is set as an HttpOnly cookie (not KV) so the
-      // callback can verify it without depending on KV propagation, and the auth
-      // token never appears in a navigable URL.
+      // navigate to. R2 binds the callback to an authorized initiation, and an
+      // HttpOnly cookie binds it to the browser. The auth token stays out of URLs.
       if (path === '/xero/connect' && request.method === 'POST') {
         if (!env.XERO_CLIENT_ID || !env.XERO_CLIENT_SECRET || !env.XERO_TOKENS) {
           return new Response(
@@ -2812,7 +2827,7 @@ export default {
             { status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
           );
         }
-        const state = crypto.randomUUID();
+        const state = await beginOAuth(env.RECEIPTS, 'xero', url.origin);
         const authorizeUrl = xero.buildAuthorizeUrl(env, request.url, state);
         const secure = url.protocol === 'https:' ? '; Secure' : '';
         return new Response(JSON.stringify({ authorizeUrl }), {
@@ -2826,8 +2841,7 @@ export default {
         });
       }
 
-      // GET /xero/callback - OAuth redirect target. Trusted via the one-time
-      // state cookie set by /xero/connect (Xero calls this directly).
+      // GET /xero/callback - consumes the transaction issued by /xero/connect.
       if (path === '/xero/callback' && request.method === 'GET') {
         // The callback URL carries the one-time OAuth code — keep it out of
         // caches and referrers.
@@ -2839,7 +2853,8 @@ export default {
         const code = url.searchParams.get('code');
         const state = url.searchParams.get('state');
         const cookieState = parseCookie(request.headers.get('Cookie'), 'xero_oauth_state');
-        if (!code || !state || !cookieState || state !== cookieState) {
+        if (!code || !state || !cookieState
+          || !(await consumeOAuth(env.RECEIPTS, 'xero', url.origin, state, cookieState))) {
           return new Response('Invalid or expired authorisation state.', { status: 400, headers: noLeak });
         }
         try {
@@ -3069,7 +3084,7 @@ export default {
             ids: lineItems.filter(line => line.receiptKey === key).map(line => xeroLineId(line, backend)),
           }));
           for (const key of receiptKeys) {
-            if (key.startsWith(INVOICE_EDITS_PREFIX) || !(await env.RECEIPTS.head(key))) {
+            if (isInternalKey(key) || !(await env.RECEIPTS.head(key))) {
               throw new ClaimsBackendInputError('Selected receipt no longer exists.');
             }
             assertInvoiceXero(await readInvoiceEdits(env.RECEIPTS, key),

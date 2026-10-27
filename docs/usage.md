@@ -71,6 +71,10 @@ In an invoice receipt preview, **← / →** move between lines without wrapping
 **Enter** toggles reviewed/unreviewed without moving, and **Escape** closes.
 Clicking the **tick** confirms the current line and opens the next preview;
 confirming the final line closes the preview. The tick never unreviews a line.
+The side arrows provide the same previous/next navigation and disable at the ends.
+Edit the registered SGD amount in the preview footer; it saves on blur, Enter,
+or navigation. Enter in the amount field saves without confirming, and Escape
+cancels the unsaved edit. Invalid or negative amounts block confirmation/navigation.
 
 Manual line edits (including Type/section, tax, account, memo, amount, remark and
 review state) are shared with other browsers and agents on reload or **Refresh**.

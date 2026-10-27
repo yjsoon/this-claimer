@@ -1240,8 +1240,19 @@ function attachInvoiceRowEditors(tr, line, accounts) {
   tr.querySelector('.inv-preview-btn').addEventListener('click', (e) => {
     e.stopPropagation();
     commitActiveInvoiceEdit();
+    const previewButtons = [...invoicesSectionsEl.querySelectorAll('.inv-preview-btn')];
+    const previewIndex = previewButtons.indexOf(tr.querySelector('.inv-preview-btn'));
     openPreview(line.receiptKey, line.receiptName, {
-      amount: formatCurrencyAmount('SGD', Number(line.amount)),
+      amount: Number(line.amount),
+      onAmountChange: (amount) => {
+        line.amount = amount;
+        saveInvoiceEdit(line.id, { amount });
+        reaffirmLineReviewAfterEdit(line, tr);
+        tr.querySelector('[data-field="amount"] .inv-cell-text').textContent = `S$${amount.toFixed(2)}`;
+        updateSectionHeaders();
+      },
+      hasPrevious: previewIndex > 0,
+      hasNext: previewIndex >= 0 && previewIndex < previewButtons.length - 1,
       reviewed: isLineReviewed(line),
       onReview: (reviewed) => setLineReviewed(line, reviewed, reviewBtn),
       onNavigate: (direction) => {
