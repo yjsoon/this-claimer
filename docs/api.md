@@ -23,7 +23,7 @@ All endpoints require the `X-Auth-Token` header, except the OAuth redirect targe
 
 `GET /list` and `GET /ynab/todos` also return a `Server-Timing` header; see [AGENTS.md](../AGENTS.md) for the Gmail, GST-tagging and diagnostics routes.
 
-### Xero subset pushes
+## Xero subset pushes
 
 `POST /xero/invoices/push` invoices exactly its `lineItems`, not every ready line.
 Send only the reviewed subset. The browser also sends `invoiceRevisions`, a map
@@ -39,6 +39,13 @@ claimed timestamp. Manual PATCH/reset preserves it and cannot modify it. A known
 bill is reused on an exact retry; an unknown result may retry the same payload
 only within five minutes. After that, reconcile against Xero manually. The old
 receipt-wide `xeroPending*` stamps are not authoritative per-line state.
+Identical in-flight requests are serialized so cleanup cannot release another
+attempt's ownership. Pre-Xero acquisition failures release only new reservations;
+an explicit Xero 400 `ValidationException` releases the rejected push's ownership
+so corrected input can be submitted. Network/5xx failures remain fail-closed.
+Successful bills are also saved once per push under the internal sidecar prefix.
+Reads recover line ownership from that record if a receipt-state write failed;
+the successful draft is returned with a warning instead of hiding its result.
 
 ## Shared invoice line overrides (agents and browsers)
 

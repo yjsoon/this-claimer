@@ -19,22 +19,39 @@ const worker = require(path.join(dir, 'worker.cjs')).default;
 Module._load = originalLoad;
 const objects = new Map();
 let etag = 0;
+let afterPut = null;
+let failOwnershipKey = '';
+let raceOwnershipKey = '';
 const bucket = {
   async get(key) { const value = objects.get(key); return value ? { ...value, json: async () => JSON.parse(value.body), arrayBuffer: async () => Buffer.from(value.body) } : null; },
   async head(key) { return objects.has(key) ? { customMetadata: {} } : null; },
   async put(key, body, options = {}) {
+    if (key === raceOwnershipKey && Object.values(JSON.parse(String(body)).xero || {}).some(state => state.invoiceID)) {
+      raceOwnershipKey = '';
+      const current = JSON.parse(objects.get(key).body);
+      current.lines['howmuch::c'] = { remark: 'Concurrent manual edit' };
+      objects.set(key, { ...objects.get(key), body: JSON.stringify(current), etag: String(++etag) });
+      return null;
+    }
+    if (key === failOwnershipKey && Object.values(JSON.parse(String(body)).xero || {}).some(state => state.invoiceID)) {
+      throw new Error('Receipt ownership storage unavailable');
+    }
     const prior = objects.get(key);
     if (options.onlyIf?.etagMatches && prior?.etag !== options.onlyIf.etagMatches) return null;
     if (options.onlyIf?.etagDoesNotMatch === '*' && prior) return null;
     const value = { body: String(body), etag: String(++etag), customMetadata: options.customMetadata || {} };
-    objects.set(key, value); return value;
+    objects.set(key, value);
+    if (afterPut) await afterPut(key, value);
+    return value;
   },
+  async delete(key) { objects.delete(key); },
 };
 const bills = new Map();
 const calls = [];
 const attachmentCalls = [];
 let loseBillResponse = false;
 let failAttachment = false;
+let rejectNextBill = false;
 global.fetch = async (url, init) => {
   if (url.startsWith('https://api.xero.com/')) {
     if (url.includes('/Attachments/')) {
@@ -46,6 +63,10 @@ global.fetch = async (url, init) => {
     calls.push(body);
     const key = new Headers(init.headers).get('Idempotency-Key');
     assert.ok(key, 'real Xero requests must carry an idempotency key');
+    if (rejectNextBill) {
+      rejectNextBill = false;
+      return Response.json({ ErrorNumber: 10, Type: 'ValidationException', Message: 'Account is archived' }, { status: 400 });
+    }
     if (!bills.has(key)) bills.set(key, { InvoiceID: `bill-${bills.size + 1}`, InvoiceNumber: `DRAFT-${bills.size + 1}` });
     if (loseBillResponse) { loseBillResponse = false; throw new Error('Connection lost after creating bill'); }
     return Response.json({ Invoices: [bills.get(key)] });
@@ -137,6 +158,51 @@ async function main() {
   const readyClaimed = await api('/xero/invoices/mark-claimed', { invoiceID: readyBill.data.invoiceID, backend: 'howmuch', lineItems: [ready] });
   assert.equal(readyClaimed.status, 200);
   assert.ok((await api('/receipt/ready.pdf/invoice-edits', undefined, 'GET')).data.xero['ynab::receipt-ready:ready.pdf'].claimedAt);
+  rejectNextBill = true;
+  const rejectedLine = line('rejected', 9.81);
+  assert.equal((await push([rejectedLine], 'Correctable')).status, 502);
+  const corrected = await push([{ ...rejectedLine, accountCode: '463' }], 'Correctable');
+  assert.equal(corrected.status, 200, 'definitive validation rejection must permit a corrected retry');
+
+  await bucket.put('a.pdf', '%PDF-1.4');
+  await bucket.put('b.pdf', '%PDF-1.4');
+  const a = { ...line('a', 11), receiptKey: 'a.pdf' };
+  const b = { ...line('b', 22), receiptKey: 'b.pdf' };
+  let releaseA, acquiredA;
+  const aGate = new Promise(resolve => { releaseA = resolve; });
+  const aAcquired = new Promise(resolve => { acquiredA = resolve; });
+  afterPut = async key => {
+    if (key === '__invoice_edits/a.pdf') { afterPut = null; acquiredA(); await aGate; }
+  };
+  const ab = push([a, b], 'A and B');
+  await aAcquired;
+  const duplicateAB = await push([a, b], 'A and B');
+  assert.equal(duplicateAB.status, 409, 'an identical in-flight push must not share releasable reservations');
+  const bWinner = await push([b], 'B wins');
+  assert.equal(bWinner.status, 200);
+  releaseA();
+  assert.equal((await ab).status, 409);
+  assert.equal((await push([a], 'A later')).status, 200, 'failed multi-receipt acquisition must release A without a bill');
+
+  await bucket.put('c.pdf', '%PDF-1.4');
+  await bucket.put('d.pdf', '%PDF-1.4');
+  const c = { ...line('c', 13), receiptKey: 'c.pdf' };
+  const d = { ...line('d', 27), receiptKey: 'd.pdf' };
+  raceOwnershipKey = '__invoice_edits/c.pdf';
+  failOwnershipKey = '__invoice_edits/d.pdf';
+  const partialWrite = await push([c, d], 'Ownership recovery');
+  assert.equal(partialWrite.status, 200, 'a created draft must remain visible even if one receipt ownership write fails');
+  const cState = JSON.parse(objects.get('__invoice_edits/c.pdf').body);
+  assert.equal(cState.xero['howmuch::c'].invoiceID, partialWrite.data.invoiceID, 'post-create ownership CAS must retry');
+  assert.equal(cState.lines['howmuch::c'].remark, 'Concurrent manual edit', 'CAS retry must retain concurrent edits');
+  const dState = (await api('/receipt/d.pdf/invoice-edits', undefined, 'GET')).data;
+  assert.equal(dState.xero['howmuch::d'].invoiceID, partialWrite.data.invoiceID, 'fresh clients recover ownership from the push ledger');
+  assert.equal((await push([d], 'Must not duplicate')).status, 409);
+  failOwnershipKey = '';
+  const beforeRecovery = calls.length;
+  assert.equal((await push([c, d], 'Ownership recovery')).data.invoiceID, partialWrite.data.invoiceID);
+  assert.equal(calls.length, beforeRecovery, 'partial ownership persistence must not cause another create');
+  assert.equal((await api('/xero/invoices/mark-claimed', { invoiceID: partialWrite.data.invoiceID, backend: 'howmuch', lineItems: [d] })).status, 200);
   console.log('Xero subsets passed (empty, partial, DRAFT/inclusive tax, repeat, overlap/concurrency, subsequent, per-line claimed, reset, stale revision, lost response/expiry, attachments)');
 }
 main().finally(() => fs.rmSync(dir, { recursive: true, force: true })).catch(error => { console.error(error); process.exitCode = 1; });

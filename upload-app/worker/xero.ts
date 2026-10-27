@@ -315,6 +315,8 @@ export interface XeroBillResult {
   url: string;
 }
 
+export class XeroBillRejected extends Error {}
+
 export function billEditUrl(invoiceID: string): string {
   return `https://go.xero.com/AccountsPayable/Edit.aspx?InvoiceID=${encodeURIComponent(invoiceID)}`;
 }
@@ -359,7 +361,13 @@ export async function createBill(env: XeroEnv, bill: XeroBillInput): Promise<Xer
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    throw new Error(`Xero create bill ${res.status}: ${(await res.text()).slice(0, 400)}`);
+    const detail = await res.text();
+    let validationRejected = false;
+    try { validationRejected = res.status === 400 && JSON.parse(detail).Type === 'ValidationException'; }
+    catch { /* An unrecognized response remains an uncertain outcome. */ }
+    const message = `Xero create bill ${res.status}: ${detail.slice(0, 400)}`;
+    if (validationRejected) throw new XeroBillRejected(message);
+    throw new Error(message);
   }
   const data = (await res.json()) as { Invoices?: Array<{ InvoiceID?: string; InvoiceNumber?: string }> };
   const inv = data.Invoices && data.Invoices[0];

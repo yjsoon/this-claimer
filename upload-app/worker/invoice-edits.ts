@@ -10,6 +10,54 @@ export interface InvoiceEdits {
 
 export class InvoiceXeroConflict extends Error {}
 
+export interface InvoiceXeroBill { invoiceID: string; invoiceNumber: string; url: string }
+
+export async function rememberInvoiceXeroBill(bucket: R2Bucket, pushKey: string, bill: InvoiceXeroBill): Promise<void> {
+  await bucket.put(`${INVOICE_EDITS_PREFIX}__xero_push/${pushKey}`, JSON.stringify(bill), {
+    httpMetadata: { contentType: 'application/json' },
+  });
+}
+
+async function hydrateInvoiceXero(bucket: R2Bucket, current: InvoiceEdits): Promise<InvoiceEdits> {
+  const bills = new Map<string, Promise<InvoiceXeroBill | null>>();
+  for (const state of Object.values(current.xero || {})) {
+    if (state.invoiceID) continue;
+    if (!bills.has(state.pushKey)) bills.set(state.pushKey, bucket.get(`${INVOICE_EDITS_PREFIX}__xero_push/${state.pushKey}`)
+      .then(object => object ? object.json<InvoiceXeroBill>() : null));
+    const bill = await bills.get(state.pushKey);
+    if (bill) Object.assign(state, { invoiceID: bill.invoiceID, invoiceNumber: bill.invoiceNumber });
+  }
+  return current;
+}
+
+// Identical in-flight requests must not share reservations: otherwise one
+// failed acquisition could release ownership while its twin creates the bill.
+export async function lockInvoiceXeroPush(bucket: R2Bucket, pushKey: string): Promise<() => Promise<void>> {
+  const key = `${INVOICE_EDITS_PREFIX}__xero_lock/${pushKey}`;
+  const locked = await bucket.put(key, 'active', { onlyIf: { etagDoesNotMatch: '*' } });
+  if (!locked) throw new InvoiceXeroConflict('This exact Xero push is already running. Wait for its result before retrying.');
+  return async () => { await bucket.delete(key); };
+}
+
+export async function releaseInvoiceXero(
+  bucket: R2Bucket, key: string, lineIds: string[], pushKey: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const object = await bucket.get(INVOICE_EDITS_PREFIX + key);
+    if (!object) return;
+    const current = await object.json<InvoiceEdits>();
+    const states = { ...current.xero };
+    const releasable = lineIds.filter(id => states[id]?.pushKey === pushKey && !states[id]?.invoiceID);
+    if (!releasable.length) return;
+    releasable.forEach(id => { delete states[id]; });
+    const written = await bucket.put(INVOICE_EDITS_PREFIX + key, JSON.stringify({
+      ...current, revision: crypto.randomUUID(), xero: states,
+    }), { onlyIf: { etagMatches: object.etag }, httpMetadata: { contentType: 'application/json' } });
+    if (written) return;
+  }
+  throw new InvoiceXeroConflict('Could not release failed push reservations. Refresh and reconcile before retrying.');
+}
+
 export function assertInvoiceXero(
   current: InvoiceEdits, lineIds: string[], pushKey: string,
   result?: { invoiceID: string }, revision?: string | null,
@@ -37,20 +85,23 @@ export async function updateInvoiceXero(
   bucket: R2Bucket, key: string, lineIds: string[], pushKey: string,
   result?: { invoiceID: string; invoiceNumber?: string; claimedAt?: string },
   revision?: string | null,
-): Promise<void> {
+): Promise<string[]> {
   const storageKey = INVOICE_EDITS_PREFIX + key;
-  const object = await bucket.get(storageKey);
-  const current: InvoiceEdits = object ? await object.json() : { revision: null, lines: {} };
-  assertInvoiceXero(current, lineIds, pushKey, result, revision);
-  const states = { ...current.xero };
-  for (const id of lineIds) states[id] = { reservedAt: Date.now(), ...states[id], pushKey, ...result };
-  const written = await bucket.put(storageKey, JSON.stringify({
-    ...current, revision: crypto.randomUUID(), xero: states,
-  }), {
-    onlyIf: object ? { etagMatches: object.etag } : { etagDoesNotMatch: '*' },
-    httpMetadata: { contentType: 'application/json' },
-  });
-  if (!written) throw new InvoiceXeroConflict('Invoice state changed concurrently. Refresh before retrying.');
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const object = await bucket.get(storageKey);
+    const current = await hydrateInvoiceXero(bucket, object ? await object.json<InvoiceEdits>() : { revision: null, lines: {} });
+    assertInvoiceXero(current, lineIds, pushKey, result, revision);
+    const states = { ...current.xero };
+    for (const id of lineIds) states[id] = { reservedAt: Date.now(), ...states[id], pushKey, ...result };
+    const written = await bucket.put(storageKey, JSON.stringify({
+      ...current, revision: crypto.randomUUID(), xero: states,
+    }), {
+      onlyIf: object ? { etagMatches: object.etag } : { etagDoesNotMatch: '*' },
+      httpMetadata: { contentType: 'application/json' },
+    });
+    if (written) return lineIds.filter(id => !current.xero?.[id]);
+  }
+  throw new InvoiceXeroConflict('Invoice state changed concurrently. Refresh before retrying.');
 }
 
 export async function listInvoiceEditKeys(bucket: R2Bucket): Promise<Set<string>> {
@@ -66,7 +117,7 @@ export async function listInvoiceEditKeys(bucket: R2Bucket): Promise<Set<string>
 
 export async function readInvoiceEdits(bucket: R2Bucket, key: string): Promise<InvoiceEdits> {
   const object = await bucket.get(INVOICE_EDITS_PREFIX + key);
-  return object ? object.json<InvoiceEdits>() : { revision: null, lines: {} };
+  return hydrateInvoiceXero(bucket, object ? await object.json<InvoiceEdits>() : { revision: null, lines: {} });
 }
 
 function validPatch(patch: unknown): patch is Record<string, unknown> {
@@ -108,7 +159,7 @@ export async function invoiceEditsResponse(request: Request, bucket: R2Bucket, k
   }
   const storageKey = INVOICE_EDITS_PREFIX + key;
   const object = await bucket.get(storageKey);
-  const current: InvoiceEdits = object ? await object.json() : { revision: null, lines: {} };
+  const current = await hydrateInvoiceXero(bucket, object ? await object.json<InvoiceEdits>() : { revision: null, lines: {} });
   if (body.revision !== current.revision) return json({ error: 'Invoice edits changed. Refresh before retrying.', ...current }, 409);
   const lineId = `${body.backend}::${body.claimId}`;
   const patch = body.patch as Record<string, unknown> | null;

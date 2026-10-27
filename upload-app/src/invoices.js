@@ -693,14 +693,16 @@ function invoicePushNote(bucket) {
 }
 
 function invoiceSectionMeta(bucket, lines, total) {
-  const pushable = pushableBucketLines(bucket);
+  const { pushable } = bucketReviewState(bucket);
   const reviewedCount = pushable.filter(isLineReviewed).length;
+  const pushedCount = lines.filter(line => rememberedInvoiceIDForItem(line)).length;
   const amount = `S$${total.toFixed(2)}`;
+  if (pushedCount) return `${lines.length} items · ${amount} · ${pushedCount} pushed · ${reviewedCount}/${pushable.length} remaining reviewed`;
   if (pushable.length === 0) return `${lines.length} items · ${amount}`;
   if (pushable.length === lines.length) {
     return `${pushable.length} bill lines · ${amount} · ${reviewedCount}/${pushable.length} reviewed`;
   }
-  return `${lines.length} items · ${pushable.length} will push · ${amount} · ${reviewedCount}/${pushable.length} reviewed`;
+  return `${lines.length} items · ${pushable.length} eligible · ${amount} · ${reviewedCount}/${pushable.length} reviewed`;
 }
 
 function invoicePeriodLabel(lines) {
@@ -860,7 +862,7 @@ function renderInvoiceSection(bucket, lines, accounts) {
   const collapsed = Boolean(loadSectionCollapsedState()[bucket]);
   const rowsHtml = lines.map((line) => renderInvoiceLineRow(line, accounts)).join('');
   const { reviewedCount } = bucketReviewState(bucket);
-  const checkedCount = pushableBucketLines(bucket).filter(isLineReviewed).length;
+  const checkedCount = pushableBucketLines(bucket).filter(line => isLineReviewed(line) && rememberedInvoiceIDForItem(line)).length;
   const noteClass = !reviewedCount ? 'invoice-doc-note invoice-doc-note-warn' : 'invoice-doc-note';
   const stampKeys = leftoverDraftStampKeys(lines);
   const stampBtn = stampKeys.length
@@ -869,7 +871,7 @@ function renderInvoiceSection(bucket, lines, accounts) {
   const pushActions = pushableBucketLines(bucket).length > 0
     ? `<button type="button" class="btn-primary invoice-push-btn" data-bucket="${bucket}" ${reviewedCount && !invoicePushInFlight ? '' : 'disabled'}>${invoicePushInFlight ? 'Pushing…' : `Push checked to Xero (${reviewedCount}) · draft`}</button>
           <button type="button" class="btn-secondary invoice-download-btn" data-bucket="${bucket}">Download receipts PDF</button>
-          <button type="button" class="btn-secondary invoice-claim-checked-btn" data-bucket="${bucket}" ${checkedCount ? '' : 'disabled'}>Mark checked as claimed</button>
+          <button type="button" class="btn-secondary invoice-claim-checked-btn" data-bucket="${bucket}" ${checkedCount ? '' : 'disabled'}>Mark checked pushed lines as claimed</button>
           <span class="${noteClass}">${escapeHtml(invoicePushNote(bucket))}</span>`
     : '';
   const actionsHtml = (pushActions || stampBtn)
@@ -1349,7 +1351,7 @@ function updateSectionHeaders() {
       pushBtn.textContent = invoicePushInFlight ? 'Pushing…' : `Push checked to Xero (${reviewedCount}) · draft`;
     }
     const claimBtn = section.querySelector('.invoice-claim-checked-btn');
-    if (claimBtn) claimBtn.disabled = pushableBucketLines(bucket).filter(isLineReviewed).length === 0;
+    if (claimBtn) claimBtn.disabled = !pushableBucketLines(bucket).some(line => isLineReviewed(line) && rememberedInvoiceIDForItem(line));
     const note = section.querySelector('.invoice-doc-note');
     if (note) {
       note.textContent = invoicePushNote(bucket);
@@ -2127,7 +2129,8 @@ async function markCheckedClaimed(data, payload, bucket, btn) {
 
 async function markCheckedSectionClaimed(bucket, btn) {
   const payload = checkedCurrentPayload(bucket);
-  await markCheckedLineItemsClaimed(bucket, payload.lineItems, btn, { payload });
+  const lineItems = payload.lineItems.filter(item => rememberedInvoiceIDForItem(item));
+  await markCheckedLineItemsClaimed(bucket, lineItems, btn, { payload });
 }
 
 function bindPushResultActions(bucket, data, payload) {

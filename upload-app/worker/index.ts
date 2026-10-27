@@ -6,7 +6,7 @@ import * as gmail from './gmail';
 import * as ai from './ai';
 import { verifyAccess, safeEqual } from './access';
 import { PDFDocument } from 'pdf-lib';
-import { INVOICE_EDITS_PREFIX, listInvoiceEditKeys, readInvoiceEdits, invoiceEditsResponse, assertInvoiceXero, updateInvoiceXero, InvoiceXeroConflict, type InvoiceEdits } from './invoice-edits';
+import { INVOICE_EDITS_PREFIX, listInvoiceEditKeys, readInvoiceEdits, invoiceEditsResponse, assertInvoiceXero, lockInvoiceXeroPush, releaseInvoiceXero, rememberInvoiceXeroBill, updateInvoiceXero, InvoiceXeroConflict, type InvoiceEdits } from './invoice-edits';
 
 const assetManifest = JSON.parse(manifestJSON);
 
@@ -3017,6 +3017,11 @@ export default {
       // POST /xero/invoices/push - create a DRAFT bill and attempt to attach
       // receipts. YNAB/receipt state is changed only by /mark-claimed.
       if (path === '/xero/invoices/push' && request.method === 'POST') {
+        let unlock: (() => Promise<void>) | undefined;
+        let mayHaveBill = false;
+        let pushKey = '';
+        const selected: Array<{ key: string; ids: string[] }> = [];
+        const reserved: Array<{ key: string; ids: string[] }> = [];
         try {
           const body = (await request.json()) as {
             bucket?: string;
@@ -3054,10 +3059,15 @@ export default {
             throw new ClaimsBackendInputError('A bill cannot contain the same invoice line twice.');
           }
           const idem = await xero.idempotencyKey(['claim-bill', backend, body.bucket || '', body.reference || '', ...lineKeys]);
+          pushKey = idem;
+          unlock = await lockInvoiceXeroPush(env.RECEIPTS, idem);
 
           // Reserve only the submitted subset. CAS with edit revisions prevents a
           // stale browser or overlapping subset from creating another bill.
           const receiptKeys = Array.from(new Set(lineItems.map(line => line.receiptKey))).sort();
+          receiptKeys.forEach(key => selected.push({ key,
+            ids: lineItems.filter(line => line.receiptKey === key).map(line => xeroLineId(line, backend)),
+          }));
           for (const key of receiptKeys) {
             if (key.startsWith(INVOICE_EDITS_PREFIX) || !(await env.RECEIPTS.head(key))) {
               throw new ClaimsBackendInputError('Selected receipt no longer exists.');
@@ -3066,15 +3076,16 @@ export default {
               lineItems.filter(line => line.receiptKey === key).map(line => xeroLineId(line, backend)),
               idem, undefined, body.invoiceRevisions?.[key]);
           }
-          for (const key of receiptKeys) {
-            await updateInvoiceXero(env.RECEIPTS, key,
-              lineItems.filter(line => line.receiptKey === key).map(line => xeroLineId(line, backend)),
+          for (const { key, ids } of selected) {
+            const newlyReserved = await updateInvoiceXero(env.RECEIPTS, key, ids,
               idem, undefined, body.invoiceRevisions?.[key]);
+            reserved.push({ key, ids: newlyReserved });
           }
 
           const knownBills = await Promise.all(lineItems.map(async line =>
             (await readInvoiceEdits(env.RECEIPTS, line.receiptKey)).xero?.[xeroLineId(line, backend)]));
           const remembered = knownBills.find(state => state?.invoiceID);
+          mayHaveBill = true;
           const bill = remembered?.invoiceID ? {
             invoiceID: remembered.invoiceID, invoiceNumber: remembered.invoiceNumber || '', url: '',
           } : await xero.createBill(env, {
@@ -3091,11 +3102,17 @@ export default {
             })),
           });
 
-          // Remember ownership before attachment work. Failure is fail-closed:
-          // retry the identical request/key, never construct an overlapping bill.
+          // One durable bill record recovers all selected reservations even if
+          // an individual receipt write fails. Readers hydrate from this ledger.
+          await rememberInvoiceXeroBill(env.RECEIPTS, idem, bill);
+          const ownershipWarnings: string[] = [];
           for (const key of receiptKeys) {
-            await updateInvoiceXero(env.RECEIPTS, key,
-              lineItems.filter(line => line.receiptKey === key).map(line => xeroLineId(line, backend)), idem, bill);
+            try {
+              await updateInvoiceXero(env.RECEIPTS, key,
+                lineItems.filter(line => line.receiptKey === key).map(line => xeroLineId(line, backend)), idem, bill);
+            } catch {
+              ownershipWarnings.push('Draft ownership is saved in the push record; refresh to recover receipt line state.');
+            }
           }
 
           // Attach receipts serially (Xero allows 5 concurrent; serial is safe).
@@ -3131,6 +3148,7 @@ export default {
               'Not every receipt was attached through the Xero API. Download the compiled receipts PDF and upload it manually in Xero before marking everything claimed.'
             );
           }
+          warnings.push(...ownershipWarnings);
 
           const pendingAt = new Date().toISOString();
           const pendingReceiptFailures: string[] = [];
@@ -3166,11 +3184,25 @@ export default {
             { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
           );
         } catch (err) {
-          const message = err instanceof Error ? err.message : 'Failed to push invoice to Xero';
+          let message = err instanceof Error ? err.message : 'Failed to push invoice to Xero';
+          // Release only new ownership on pre-Xero failure. A definitive
+          // validation rejection proves no bill exists, so its whole key can
+          // be released. Unknown network/5xx outcomes must remain reserved.
+          if (unlock && (!mayHaveBill || err instanceof xero.XeroBillRejected)) {
+            try {
+              for (const { key, ids } of err instanceof xero.XeroBillRejected ? selected : reserved) {
+                await releaseInvoiceXero(env.RECEIPTS, key, ids, pushKey);
+              }
+            } catch (releaseErr) {
+              message += ` ${releaseErr instanceof Error ? releaseErr.message : 'Reservation cleanup failed; reconcile before retrying.'}`;
+            }
+          }
           return new Response(JSON.stringify({ error: message }), {
             status: err instanceof InvoiceXeroConflict ? 409 : err instanceof ClaimsBackendInputError ? 400 : 502,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
+        } finally {
+          if (unlock) await unlock();
         }
       }
 

@@ -664,8 +664,7 @@ async function main() {
   ], 'invoice account options should be alphabetical by category name');
   await page.keyboard.press('Escape');
 
-  await page.locator('.invoice-section[data-bucket="nongst"] .invoice-claim-checked-btn').click();
-  await page.waitForFunction(() => document.querySelector('#status')?.textContent?.includes('do not have a remembered bill from a push in this browser'));
+  assert.equal(await page.locator('.invoice-section[data-bucket="nongst"] .invoice-claim-checked-btn').isDisabled(), true);
   if (markClaimRequests.length !== 0) {
     throw new Error('leftover xeroPending stamps must not be enough to mark claimed');
   }
@@ -684,6 +683,8 @@ async function main() {
     }));
   });
 
+  await page.locator('#invoicesRefreshBtn').click();
+  await page.waitForFunction(() => document.querySelector('#invoicesSections')?.getAttribute('aria-busy') !== 'true');
   primaryMockState.delayMarkClaimed = true;
   await page.locator('.invoice-section[data-bucket="nongst"] .invoice-claim-checked-btn').click();
   await page.locator('#claimsBackend').selectOption('ynab');
@@ -1382,6 +1383,12 @@ async function main() {
   assert.equal(await subsetPush().isDisabled(), true, 'already pushed review is not a new selection in another browser');
   assert.equal(await subsetRow('subset-b').locator('.inv-review-btn').getAttribute('aria-pressed'), 'false');
   await subsetRow('subset-b').locator('.inv-review-btn').click();
+  const beforeMixedClaim = markClaimRequests.length;
+  await subsetPage.locator('.invoice-section[data-bucket="gst"] .invoice-claim-checked-btn').click();
+  await subsetPage.waitForFunction(() => document.querySelector('#status').textContent.includes('Marked 1 checked GST item claimed'));
+  assert.equal(markClaimRequests.length, beforeMixedClaim + 1);
+  assert.deepEqual(markClaimRequests.at(-1).lineItems.map(item => item.ynabClaimId), ['subset-a'], 'claim action must exclude checked lines not yet pushed');
+  assert.equal(await subsetRow('subset-b').locator('.inv-review-btn').getAttribute('aria-pressed'), 'true', 'unchecked-for-push sibling stays reviewed for its later draft');
   await subsetPage.locator('tr[data-id="howmuch::later-subset.pdf::subset-c"] .inv-review-btn').click();
   subsetPage.once('dialog', dialog => dialog.accept('Remaining subset'));
   await subsetPush().click();
