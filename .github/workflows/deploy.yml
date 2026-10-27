@@ -16,7 +16,8 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    # Both locked Playwright versions support this runner's browser libraries.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
