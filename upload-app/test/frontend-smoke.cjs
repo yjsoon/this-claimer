@@ -1453,6 +1453,46 @@ async function main() {
     'badge should hide when there are no bill lines to submit');
   await badgePage.close();
 
+  // Untrusted provider fields must round-trip as data in every shared-encoder
+  // attribute context, including when an invoice editor focuses its input.
+  const attack = `quote" onfocus="window.securityFailure=1" onmouseover="window.securityFailure=1" data-tail="<&'`;
+  const securityPage = await browser.newPage();
+  await securityPage.addInitScript(() => localStorage.setItem('claim_manager_auth', 'test'));
+  await setupMockApi(securityPage, {
+    receipts: [
+      { ...receiptsPageOne[0], originalName: attack },
+      { ...receiptsPageOne[1], originalName: attack, linkedClaimIds: [attack], xeroPendingInvoiceId: undefined },
+    ],
+    todos: [{ ...todos[0], id: attack, description: attack }, { ...todos[1], description: attack }],
+  });
+  await securityPage.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'networkidle' });
+  assert.equal(await securityPage.locator('#receiptList li[data-key]').first().getAttribute('data-name'), attack);
+  assert.equal(await securityPage.locator('#todoList .todo-item').first().getAttribute('data-description'), attack);
+  assert.equal(await securityPage.locator('[data-receipt-name]').first().getAttribute('data-receipt-name'), attack);
+  await securityPage.getByRole('button', { name: 'Find matches', exact: true }).click();
+  await securityPage.waitForSelector('.match-preview-btn');
+  assert.equal(await securityPage.locator('.match-preview-btn').first().getAttribute('aria-label'), `Preview receipt for ${attack}`);
+  assert.equal(await securityPage.locator('[onmouseover], [onfocus]').count(), 0);
+  await securityPage.locator('#navInvoices').click();
+  const securityRow = securityPage.locator('.invoice-section tr[data-id]').first();
+  await securityRow.waitFor();
+  assert.ok((await securityRow.getAttribute('data-id')).endsWith(attack));
+  await securityRow.locator('[data-field="description"]').dblclick();
+  assert.equal(await securityRow.locator('input').inputValue(), attack);
+  assert.equal(await securityPage.locator('[onmouseover], [onfocus]').count(), 0);
+  assert.equal(await securityPage.evaluate(() => window.securityFailure), undefined);
+  await securityPage.keyboard.press('Escape');
+  // Legacy HTML named .pdf must not execute in the application's origin.
+  await securityPage.route('**/receipt/receipt-2.pdf', route => route.fulfill({
+    contentType: 'text/html', body: '<script>parent.securityFailure=1</script>',
+  }));
+  await securityRow.locator('.inv-preview-btn').click();
+  await securityPage.waitForFunction(() => document.querySelector('#previewFilename').textContent.endsWith('(failed to load)'));
+  assert.equal(await securityPage.locator('#previewPdf').getAttribute('src'), null);
+  assert.equal(await securityPage.evaluate(() => window.securityFailure), undefined);
+  await securityPage.close();
+  console.log('Security browser contracts passed: six attribute sinks and legacy active-content preview');
+
   await browser.close();
   server.close();
   console.log('frontend smoke passed');

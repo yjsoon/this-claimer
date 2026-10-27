@@ -5,10 +5,13 @@ on:
     branches: [main]
     paths:
       - 'upload-app/**'
+      - 'shared/**'
       - '.github/workflows/deploy.yml'
   pull_request:
     paths:
       - 'upload-app/**'
+      - 'shared/**'
+      - 'scripts/**'
       - '.github/workflows/deploy.yml'
 
 jobs:
@@ -45,6 +48,19 @@ jobs:
       - name: Access verification tests
         working-directory: upload-app
         run: npm run test:access
+
+      - name: Security and Gmail contracts
+        working-directory: upload-app
+        run: |
+          npm run test:security
+          npm run test:gmail
+
+      - name: Offline receipt exporter contracts
+        working-directory: scripts
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npm run test:security
 
       - name: AI settings tests
         working-directory: upload-app

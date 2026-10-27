@@ -1,3 +1,6 @@
+import { htmlToText, MAX_RECEIPT_HTML } from '../../shared/receipt-html';
+export { htmlToText } from '../../shared/receipt-html';
+
 // Gmail receipt import for Cloudflare Workers.
 //
 // Links one or more Gmail accounts over Google OAuth 2.0 (read-only scope),
@@ -477,27 +480,12 @@ function findHtml(part: GmailPart | undefined): string | null {
   let html: string | null = null;
   walkParts(part, (p) => {
     if (!html && p.mimeType === 'text/html' && p.body?.data) {
+      // Skip permanently oversized messages without decoding or retrying them.
+      if (p.body.data.length > Math.ceil(MAX_RECEIPT_HTML / 3) * 4) return;
       html = new TextDecoder().decode(decodeBase64Url(p.body.data));
     }
   });
   return html;
-}
-
-export function htmlToText(html: string): string {
-  return html
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(div|p|td|tr|table|h1|h2|h3)>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&#36;/g, '$')
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
-    .replace(/\s+/g, ' ')
-    .trim();
 }
 
 // --- HTML ride receipts ------------------------------------------------------
@@ -636,7 +624,7 @@ async function importAttachments(ctx: ScanContext, messageId: string): Promise<v
 async function importHtmlReceipt(ctx: ScanContext, rule: HtmlReceiptRule, messageId: string): Promise<void> {
   const message = await gmailFetch<GmailMessage>(ctx.accessToken, `/messages/${messageId}?format=full`);
   const html = findHtml(message.payload);
-  if (!html) return;
+  if (!html || html.length > MAX_RECEIPT_HTML) return;
   const text = htmlToText(html);
   if (!rule.isReceipt(text)) return;
 

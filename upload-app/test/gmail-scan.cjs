@@ -17,6 +17,14 @@ buildSync({
 });
 const gmail = require(outfile);
 
+assert.equal(gmail.htmlToText('<style>hide</style><p>A &amp; B</p><script>hide</script><div>&#36;12.30</div>'), 'A & B $12.30');
+for (const malformed of ['<'.repeat(100000), '<style>'.repeat(14000), '<script>'.repeat(12000)]) {
+  const start = performance.now();
+  assert.equal(gmail.htmlToText(malformed), '');
+  assert.ok(performance.now() - start < 2000, 'malformed HTML must not repeatedly scan the remaining suffix');
+}
+assert.throws(() => gmail.htmlToText('x'.repeat(1024 * 1024 + 1)), /exceeds/);
+
 function b64url(input) {
   return Buffer.from(input).toString('base64url');
 }
@@ -56,6 +64,7 @@ const messages = {
   m2: { id: 'm2', payload: { headers: [{ name: 'Subject', value: 'Invoice' }], parts: [{ mimeType: 'application/zip', filename: 'x.zip', body: { attachmentId: 'z', size: 10 } }] } },
   g1: { id: 'g1', payload: { headers: [{ name: 'Subject', value: 'Your Grab E-Receipt' }], mimeType: 'text/html', body: { data: b64url(grabHtml) } } },
   g2: { id: 'g2', payload: { headers: [{ name: 'Subject', value: 'Your Grab E-Receipt' }], mimeType: 'text/html', body: { data: b64url(grabFoodHtml) } } },
+  huge: { id: 'huge', payload: { mimeType: 'text/html', body: { data: b64url(grabHtml + '<'.repeat(1024 * 1024)) } } },
 };
 const attachments = { a1: PDF, a4: BIG_IMAGE };
 
@@ -89,7 +98,7 @@ global.fetch = async (input, init = {}) => {
     if (p === '/messages') {
       const q = url.searchParams.get('q');
       assert.match(q, /after:\d+/);
-      if (q.includes('from:grab')) return json({ messages: [{ id: 'g1' }, { id: 'g2' }] });
+      if (q.includes('from:grab')) return json({ messages: [{ id: 'huge' }, { id: 'g1' }, { id: 'g2' }] });
       if (q.includes('Gojek')) return json({});
       return json({ messages: [{ id: 'm1' }, { id: 'm2' }] });
     }
