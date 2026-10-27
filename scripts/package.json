@@ -7,6 +7,7 @@
     "export:gojek": "npx tsx export-ride-receipt.ts --provider gojek",
     "export:grab": "npx tsx export-ride-receipt.ts --provider grab",
     "export:ride": "npx tsx export-ride-receipt.ts",
+    "test:security": "tsx export-ride-receipt.test.ts",
     "submit": "npx tsx volopay-submit.ts"
   },
   "dependencies": {
