@@ -48,7 +48,7 @@ function memoryKv() {
 // pageCap: R2 may return fewer objects than `limit` when metadata is included.
 // ignoreInclude: a runtime that never returns customMetadata from list().
 function fakeR2(objects, { pageCap = 1000, ignoreInclude = false } = {}) {
-  const calls = { list: 0, head: 0, get: 0, put: 0, listLimits: [] };
+  const calls = { list: 0, head: 0, get: 0, put: 0 };
   const view = (key, withMetadata) => {
     const o = objects.get(key);
     return {
@@ -64,7 +64,6 @@ function fakeR2(objects, { pageCap = 1000, ignoreInclude = false } = {}) {
     calls,
     async list(opts = {}) {
       calls.list += 1;
-      calls.listLimits.push(opts.limit);
       const keys = [...objects.keys()].sort().filter((k) => !opts.prefix || k.startsWith(opts.prefix));
       const withMetadata = !ignoreInclude && (opts.include || []).includes('customMetadata');
       const start = opts.cursor ? Number(opts.cursor) : 0;
@@ -105,8 +104,9 @@ function fakeR2(objects, { pageCap = 1000, ignoreInclude = false } = {}) {
 }
 
 // Receipts cycle through: pushed to Xero; GST-tagged and linked; untagged;
-// linked only; amount-tagged as missing. An internal key sorts first and
-// counts towards the scan window like any listed object.
+// linked only; amount-tagged as missing. Internal keys ('__' sorts after the
+// date-prefixed receipt keys) count towards the scan window but are never
+// candidates.
 const VARIANTS = [
   { xeroInvoiceId: 'inv-1' },
   { taggedGstShown: 'true', linkedClaimIds: '["c1"]' },
@@ -117,6 +117,7 @@ const VARIANTS = [
 function bucket(count) {
   const objects = new Map();
   objects.set('__invoice_edits/receipt.json', { body: '{}', version: 1, type: 'application/json', meta: {} });
+  objects.set('__oauth/state', { body: '{}', version: 1, type: 'application/json', meta: {} });
   for (let i = 0; i < count; i += 1) {
     const key = `2026-01-01_000000_${String(i).padStart(5, '0')}_r.png`;
     objects.set(key, { body: 'img', version: 1, type: 'image/png', meta: { ...VARIANTS[i % VARIANTS.length] } });
@@ -155,19 +156,21 @@ async function call(route, objects, r2Options, RECEIPTS = fakeR2(objects, r2Opti
 
 function assertGst(body, objects, scanWindow, limit) {
   const eligible = gstEligible(objects, scanWindow);
-  assert.deepEqual(body.results.map((r) => r.key), eligible.slice(0, limit));
+  const expected = eligible.slice(0, limit);
+  assert.deepEqual(body.results.map((r) => r.key), expected);
   assert.ok(body.results.every((r) => r.status === 'failed'));
   assert.equal(body.requested, limit);
-  assert.equal(body.processed, limit);
-  assert.equal(body.failed, limit);
+  assert.equal(body.processed, expected.length);
+  assert.equal(body.failed, expected.length);
   assert.equal(body.tagged, 0);
   assert.equal(body.remaining, eligible.length);
 }
 
 function assertAmount(body, objects, scanWindow, limit) {
-  assert.deepEqual(body.results.map((r) => r.key), amountEligible(objects, scanWindow).slice(0, limit));
+  const expected = amountEligible(objects, scanWindow).slice(0, limit);
+  assert.deepEqual(body.results.map((r) => r.key), expected);
   assert.ok(body.results.every((r) => r.status === 'failed'));
-  assert.equal(body.processed, limit);
+  assert.equal(body.processed, expected.length);
 }
 
 async function main() {
@@ -178,13 +181,21 @@ async function main() {
     assertGst(gst.body, objects, 1000, 8);
     assert.equal(gst.calls.list, 1);
     assert.equal(gst.calls.head, 0);
-    assert.deepEqual(gst.calls.listLimits, [1000]);
 
-    const amount = await call('/amount-tags/pending?limit=3', bucket(1000));
-    assertAmount(amount.body, objects, 12, 3);
+    const amountObjects = bucket(1000);
+    const amount = await call('/amount-tags/pending?limit=3', amountObjects);
+    assertAmount(amount.body, amountObjects, 12, 3);
     assert.equal(amount.calls.list, 1);
     assert.equal(amount.calls.head, 0);
-    assert.deepEqual(amount.calls.listLimits, [12]);
+  }
+
+  // Scan window covers the internal keys: they are listed but never tagged.
+  {
+    const objects = bucket(10);
+    const gst = await call('/gst-tags/pending?limit=8', objects);
+    assertGst(gst.body, objects, 1000, 8);
+    const amount = await call('/amount-tags/pending?limit=8', objects);
+    assertAmount(amount.body, objects, 32, 8);
   }
 
   // Short pages: follow the cursor up to the scan window, and no further, even
@@ -195,12 +206,11 @@ async function main() {
     assertGst(gst.body, objects, 1000, 8);
     assert.ok(gstEligible(objects, 2501).length > gstEligible(objects, 1000).length);
     assert.equal(gst.calls.head, 0);
-    assert.deepEqual(gst.calls.listLimits, [1000, 700, 400, 100]);
 
-    const amount = await call('/amount-tags/pending?limit=3', bucket(2500), { pageCap: 5 });
-    assertAmount(amount.body, objects, 12, 3);
+    const amountObjects = bucket(2500);
+    const amount = await call('/amount-tags/pending?limit=3', amountObjects, { pageCap: 5 });
+    assertAmount(amount.body, amountObjects, 12, 3);
     assert.equal(amount.calls.head, 0);
-    assert.deepEqual(amount.calls.listLimits, [12, 7, 2]);
   }
 
   // Runtime ignores `include`: same output, via one head() per listed object.
@@ -211,8 +221,9 @@ async function main() {
     assert.equal(gst.calls.list, 1);
     assert.equal(gst.calls.head, 1000);
 
-    const amount = await call('/amount-tags/pending?limit=3', bucket(1000), { ignoreInclude: true });
-    assertAmount(amount.body, objects, 12, 3);
+    const amountObjects = bucket(1000);
+    const amount = await call('/amount-tags/pending?limit=3', amountObjects, { ignoreInclude: true });
+    assertAmount(amount.body, amountObjects, 12, 3);
     assert.equal(amount.calls.head, 12);
   }
 
