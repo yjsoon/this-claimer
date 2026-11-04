@@ -13,7 +13,8 @@
     "test:ai": "node test/ai-settings.cjs",
     "test:access": "node test/access.cjs",
     "test:security": "node test/security.cjs",
-    "smoke:ai-frontend": "node test/ai-frontend.cjs"
+    "smoke:ai-frontend": "node test/ai-frontend.cjs",
+    "test:pending-tags": "node test/pending-tags.cjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260911.1",
