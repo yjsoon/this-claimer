@@ -628,6 +628,28 @@ async function fetchYnabTodos(
   return sortYnabTodos(todos);
 }
 
+// Lists up to `limit` objects (from the start of the bucket) with their custom
+// metadata, so scans don't need a head() per object. R2 may return a shorter
+// page when metadata is included, so follow the cursor until `limit` objects or
+// the end of the bucket.
+async function listObjectsWithMetadata(
+  env: Env,
+  limit: number
+): Promise<Array<{ key: string; metadata: Record<string, string> }>> {
+  const objects: Array<{ key: string; metadata: Record<string, string> }> = [];
+  let cursor: string | undefined;
+  do {
+    const listed = await env.RECEIPTS.list({ limit: limit - objects.length, cursor, include: ['customMetadata'] });
+    for (const obj of listed.objects) {
+      // Fall back to head() only if the runtime ignored `include`.
+      const metadata = obj.customMetadata ?? (await env.RECEIPTS.head(obj.key))?.customMetadata ?? {};
+      objects.push({ key: obj.key, metadata });
+    }
+    cursor = listed.truncated ? listed.cursor : undefined;
+  } while (cursor && objects.length < limit);
+  return objects;
+}
+
 async function listReceiptSummaries(
   env: Env,
   options: { limit?: number; cursor?: string } = {},
@@ -1256,18 +1278,16 @@ async function tagPendingGst(env: Env, limit: number): Promise<{
   results: GstTagResult[];
 }> {
   env = await ai.withAiSettings(env);
-  const listed = await env.RECEIPTS.list({ limit: 1000 });
+  const listed = await listObjectsWithMetadata(env, 1000);
   const candidateKeys: string[] = [];
   let remaining = 0;
 
-  for (const object of listed.objects) {
-    if (isInternalKey(object.key)) continue;
-    const head = await env.RECEIPTS.head(object.key);
-    const metadata = head?.customMetadata || {};
+  for (const { key, metadata } of listed) {
+    if (isInternalKey(key)) continue;
     if (metadata.xeroInvoiceId) continue;
     if (metadata.taggedGstShown !== undefined) continue;
     remaining += 1;
-    if (candidateKeys.length < limit) candidateKeys.push(object.key);
+    if (candidateKeys.length < limit) candidateKeys.push(key);
   }
 
   const results: GstTagResult[] = [];
@@ -1423,17 +1443,15 @@ async function tagPendingReceipts(env: Env, limit: number): Promise<{
 }> {
   env = await ai.withAiSettings(env);
   const scanLimit = Math.min(Math.max(limit * 4, limit), 200);
-  const listed = await env.RECEIPTS.list({ limit: scanLimit });
+  const listed = await listObjectsWithMetadata(env, scanLimit);
   const candidateKeys: string[] = [];
 
-  for (const object of listed.objects) {
-    if (isInternalKey(object.key)) continue;
-    const head = await env.RECEIPTS.head(object.key);
-    const metadata = head?.customMetadata || {};
+  for (const { key, metadata } of listed) {
+    if (isInternalKey(key)) continue;
     const linkedClaimIds = parseLinkedClaimIds(metadata.linkedClaimIds, metadata.linkedClaimId);
     if (linkedClaimIds.length > 0) continue;
     if (metadata.taggedStatus === 'ok' || metadata.taggedStatus === 'missing') continue;
-    candidateKeys.push(object.key);
+    candidateKeys.push(key);
     if (candidateKeys.length >= limit) break;
   }
 

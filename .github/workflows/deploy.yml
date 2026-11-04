@@ -47,6 +47,7 @@ jobs:
         run: |
           npm run smoke:worker-claims
           npm run test:xero
+          npm run test:pending-tags
 
       - name: Access verification tests
         working-directory: upload-app
