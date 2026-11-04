@@ -53,9 +53,9 @@ YNAB memo convention: `TODO: <description>` is a pending claim; `CLAIMED: <descr
 
 ## Invoices (Xero claim bills)
 
-An alternative to Volopay: the web app's **Invoices** tab turns ready-to-claim items into monthly DRAFT bills in Xero (payee "Soon Yin Jie"), split into GST / non-GST / transport, with receipts attached. After a push, receipts are tagged `xeroInvoiceId` (so they drop off the tab) and the linked `TODO:` memos become `CLAIMED:`. Setup and usage are in the `claim-invoices` skill. Do not deploy to the live worker without the user's go-ahead.
+An alternative to Volopay: the web app's **Invoices** tab turns ready-to-claim items into monthly DRAFT bills in Xero (payee "Soon Yin Jie"), split into GST / non-GST / transport, with receipts attached. Push (`/xero/invoices/push`) only creates the DRAFT and attaches receipts. After the user reviews the draft, **Mark checked as claimed** (`/xero/invoices/mark-claimed`) tags the receipts with `xeroInvoiceId` (so they drop off the tab) and turns the linked `TODO:` memos into `CLAIMED:`. Setup and usage are in the `claim-invoices` skill. Do not deploy to the live worker without the user's go-ahead.
 
-- Account/tax-code rules match the Volopay section (amounts are tax-inclusive SGD). Xero attachment caps (3 MB/file, 10/bill) are handled by merging receipts into chunked combined PDFs; HEIC/WEBP can't be embedded and are flagged for manual upload.
+- Account/tax-code rules match the Volopay section (amounts are tax-inclusive SGD). Xero allows 25 MB per attachment and 10 attachments per bill. Up to 10 supported files upload individually; beyond that, receipts are merged into combined PDFs chunked at about 22 MB. HEIC/WEBP can't be embedded and are flagged for manual upload.
 - Manual invoice overrides go through `GET|PATCH /receipt/:key/invoice-edits`. Use the exact revision from GET for PATCH; a 409 requires deliberate conflict resolution, not a blind retry. Overrides are separate from the AI `taggedGst*` findings. For YJ's Foodpanda platform-fee-only GST exception, set the line to `section: "nongst"`, `gstShown: false`, `taxType: "NRINPUT"`; do not falsify the AI's printed GST finding. See `docs/api.md`. Never mutate live receipt overrides just to verify an implementation.
 
 ## Receipt tagging
